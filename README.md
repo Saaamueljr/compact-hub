@@ -14,7 +14,7 @@ Nesta versão:
 2. Faça login com sua conta Google e clique em "Create API key"
 3. Copie a chave — você vai usar no passo 4, **nunca** cole ela no código
 
-O tier gratuito do Gemini (modelo `gemini-2.5-flash`, com busca) cobre bem mais uso do que uma biblioteca pessoal vai gerar. Confira a disponibilidade e os limites atuais em https://ai.google.dev/gemini-api/docs/pricing — se um dia esse modelo for descontinuado, o único lugar que precisa mudar é a variável `GEMINI_MODEL` no passo 4.
+O tier gratuito do Gemini (modelos Flash/Flash-Lite com busca) cobre bem mais uso do que uma biblioteca pessoal vai gerar. Se um dia mudar de ideia, o único lugar que precisa mudar é a variável `GEMINI_MODEL` no passo 4.
 
 ## 2. Instalar dependências e testar local (opcional)
 
@@ -43,26 +43,27 @@ git remote add origin <URL_DO_SEU_REPO>
 git push -u origin main
 ```
 
-## 4. Deploy no Cloudflare Pages
+## 4. Deploy no Cloudflare (modelo "Workers" unificado)
 
-1. Acesse https://dash.cloudflare.com/ → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**
-2. Selecione o repositório que você acabou de subir
-3. Configuração de build:
-   - **Framework preset:** Vite
+1. Acesse https://dash.cloudflare.com/ → **Compute & AI** → **Workers & Pages**
+2. Clique em **Create application**
+3. Escolha a opção de conectar um repositório Git (**Import a repository** / **Connect to Git**) e selecione o repositório que você subiu
+4. Configuração de build:
    - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-4. Antes de clicar em "Save and Deploy", vá em **Environment variables** e adicione:
-   - `GEMINI_API_KEY` = a chave que você pegou no passo 1 (marque como **Secret**)
-   - (opcional) `GEMINI_MODEL` = `gemini-2.5-flash` (ou outro modelo do free tier, se esse for descontinuado)
-5. Clique em Deploy. Em ~1-2 minutos o Cloudflare te dá uma URL tipo `compat-hub.pages.dev`
+   - **Deploy command:** deixe o padrão `npx wrangler deploy` (o `wrangler.jsonc` do projeto já diz pra ele servir `dist/` como site estático e usar `worker/index.js` como Worker da API)
+   - **Builds for non-production branches:** pode deixar desmarcado — isso só cria URLs de preview pra branches além da `main`, não é necessário agora e não tem custo de qualquer forma
+5. Antes de confirmar, vá em **Settings > Variables and Secrets** (pode aparecer só depois do primeiro deploy, tudo bem) e adicione:
+   - `GEMINI_API_KEY` = a chave que você pegou no passo 1, marcada como **Secret** (criptografada, nunca visível de novo no painel)
+   - (opcional) `GEMINI_MODEL` = `gemini-3-flash` (ou outro modelo, se esse for descontinuado)
+6. Salve e deixe rodar o deploy. Em poucos minutos o Cloudflare te dá uma URL tipo `compat-hub.<seu-subdominio>.workers.dev`
 
-A pasta `functions/api/` é detectada automaticamente pelo Cloudflare Pages — não precisa configurar nada além da variável de ambiente.
+Se você não configurou a variável antes do primeiro deploy, sem problema: adicione depois em Settings > Variables and Secrets e clique em "Retry deployment" (ou aguarde o próximo push) pra ela ser aplicada.
 
 ## 5. Confirmar que está tudo funcionando
 
 - Abra a URL do deploy, clique em "Adicionar jogo", adicione um jogo qualquer
 - Clique em "Analisar compatibilidade agora"
-- Se der erro `GEMINI_API_KEY não configurada`, confirme que salvou a variável de ambiente no passo 4 e refaça o deploy (Cloudflare Pages → seu projeto → Deployments → Retry deployment)
+- Se der erro `GEMINI_API_KEY não configurada`, confirme que salvou a variável no passo 4 e refaça o deploy
 
 ## Sobre custo
 
@@ -70,8 +71,8 @@ Enquanto o uso ficar dentro do tier gratuito do Gemini (na casa de milhares de c
 
 ## Migrando pra outro host
 
-A arquitetura (frontend estático + 1 function serverless) roda igual em Vercel ou Netlify, só muda:
-- Vercel: mover `functions/api/analyze.js` pra `api/analyze.js` e adaptar pro formato de handler do Vercel (`export default async function handler(req, res) {...}`)
-- Netlify: mover pra `netlify/functions/analyze.js`, formato `exports.handler = async (event) => {...}`
+A arquitetura (frontend estático + 1 Worker que também serve a API) roda igual em Vercel ou Netlify, só muda onde fica o código do backend:
+- Vercel: crie `api/analyze.js` no formato de handler do Vercel (`export default async function handler(req, res) {...}`) usando a mesma lógica de `worker/index.js`
+- Netlify: crie `netlify/functions/analyze.js`, formato `exports.handler = async (event) => {...}`
 
-A lógica interna (montar o prompt, chamar o Gemini, parsear o JSON) é a mesma nos três.
+A lógica interna (montar o prompt, chamar o Gemini, parsear o JSON) é a mesma em qualquer um dos três.
