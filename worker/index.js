@@ -71,18 +71,38 @@ Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  let geminiResponse;
-  try {
-    geminiResponse = await fetch(url, {
+  // Tenta primeiro com busca (grounding) pra ter dados atualizados sobre o jogo.
+  // A cota de grounding é bem mais restrita que a de geração de texto normal,
+  // então se vier 429 (cota excedida), tenta de novo sem a busca — o modelo
+  // ainda responde bem usando só o que já sabe, especialmente pra jogos antigos.
+  async function callGemini(useGrounding) {
+    const body = {
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      generationConfig: { temperature: 0.4 },
+    };
+    if (useGrounding) {
+      body.tools = [{ google_search: {} }];
+    }
+    return fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0.4 },
-      }),
+      body: JSON.stringify(body),
     });
+  }
+
+  let geminiResponse;
+  let usedGrounding = true;
+  let fellBackFromQuota = false;
+  try {
+    geminiResponse = await callGemini(true);
+
+    if (geminiResponse.status === 429) {
+      // Cota de busca provavelmente excedida — tenta de novo sem grounding.
+      usedGrounding = false;
+      fellBackFromQuota = true;
+      geminiResponse = await callGemini(false);
+    }
   } catch (e) {
     return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
   }
@@ -103,7 +123,7 @@ Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
     return json({ error: "O Gemini não retornou texto na resposta." }, 502);
   }
 
-  return json({ text });
+  return json({ text, usedGrounding, fellBackFromQuota });
 }
 
 export default {
