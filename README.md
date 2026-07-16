@@ -54,7 +54,9 @@ git push -u origin main
    - **Builds for non-production branches:** pode deixar desmarcado — isso só cria URLs de preview pra branches além da `main`, não é necessário agora e não tem custo de qualquer forma
 5. Antes de confirmar, vá em **Settings > Variables and Secrets** (pode aparecer só depois do primeiro deploy, tudo bem) e adicione:
    - `GEMINI_API_KEY` = a chave que você pegou no passo 1, marcada como **Secret** (criptografada, nunca visível de novo no painel)
-   - (opcional) `GEMINI_MODEL` = `gemini-3-flash` (ou outro modelo, se esse for descontinuado)
+   - (opcional) `GEMINI_MODEL` = `gemini-3.5-flash` (ou outro modelo, se esse for descontinuado)
+   - (opcional, só se for usar a integração com RetroAchievements) `RA_USERNAME` = seu usuário no retroachievements.org, tipo **Plaintext**
+   - (opcional, só se for usar a integração com RetroAchievements) `RA_API_KEY` = sua Web API Key do RetroAchievements (painel do seu perfil lá, seção "Keys"), marcada como **Secret**
 6. Salve e deixe rodar o deploy. Em poucos minutos o Cloudflare te dá uma URL tipo `compat-hub.<seu-subdominio>.workers.dev`
 
 Se você não configurou a variável antes do primeiro deploy, sem problema: adicione depois em Settings > Variables and Secrets e clique em "Retry deployment" (ou aguarde o próximo push) pra ela ser aplicada.
@@ -64,6 +66,7 @@ Se você não configurou a variável antes do primeiro deploy, sem problema: adi
 - Abra a URL do deploy, clique em "Adicionar jogo", adicione um jogo qualquer
 - Clique em "Analisar compatibilidade agora"
 - Se der erro `GEMINI_API_KEY não configurada`, confirme que salvou a variável no passo 4 e refaça o deploy
+- Pra testar o RetroAchievements: abra um jogo que tenha suporte no RA, cole o ID do jogo (número que aparece na URL dele em retroachievements.org) no campo "RetroAchievements" e clique no botão de atualizar
 
 ## Sobre custo
 

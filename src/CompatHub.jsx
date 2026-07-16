@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users
+  Star, Users, Trophy
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -572,6 +572,7 @@ export default function CompatHub() {
           onUpdateGoals={(goals) => updateGame(activeGame.id, { goals })}
           onToggleFavorite={() => toggleFavorite(activeGame.id)}
           onSetStatus={(status) => setGameStatus(activeGame.id, status)}
+          onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -801,7 +802,128 @@ function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
   );
 }
 
-function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onRemove }) {
+function RetroAchievementsSection({ game, onUpdateRaGameId }) {
+  const [gameIdInput, setGameIdInput] = useState(game.raGameId || "");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+
+  async function fetchProgress(id) {
+    if (!id) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/retroachievements?gameId=${encodeURIComponent(id)}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      setData(body);
+    } catch (e) {
+      setError(e.message);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Se o jogo já tem um ID salvo, busca o progresso automaticamente ao abrir.
+  useEffect(() => {
+    if (game.raGameId) fetchProgress(game.raGameId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
+  function handleSave() {
+    const trimmed = gameIdInput.trim();
+    onUpdateRaGameId(trimmed);
+    if (trimmed) fetchProgress(trimmed);
+  }
+
+  const visibleAchievements = data ? (showAll ? data.achievements : data.achievements.slice(0, 6)) : [];
+  const pct = data && data.numAchievements ? Math.round((data.numAwardedToUser / data.numAchievements) * 100) : 0;
+
+  return (
+    <div className="mb-5">
+      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+        <Trophy className="w-3.5 h-3.5" /> RetroAchievements
+      </div>
+
+      <div className="flex gap-2 mb-2">
+        <input
+          value={gameIdInput}
+          onChange={(e) => setGameIdInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+          placeholder="ID do jogo no RetroAchievements (ex: 14402)"
+          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600 font-mono"
+        />
+        <button
+          onClick={handleSave}
+          disabled={loading || !gameIdInput.trim()}
+          className="text-sm bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 transition-colors rounded-lg px-3 flex items-center justify-center"
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+        </button>
+      </div>
+
+      {!game.raGameId && !gameIdInput.trim() && (
+        <p className="text-xs text-zinc-600 mb-2">
+          Cole o ID do jogo no RetroAchievements (o número que aparece na URL do jogo no site) pra acompanhar suas
+          conquistas aqui.
+        </p>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-2 text-xs text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          {error}
+        </div>
+      )}
+
+      {data && (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">
+              {data.numAwardedToUser}/{data.numAchievements} conquistas
+            </span>
+            <span className="text-xs text-zinc-500">{data.userCompletion}</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-3">
+            <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
+          </div>
+          <ul className="space-y-1.5">
+            {visibleAchievements.map((a) => (
+              <li
+                key={a.id}
+                className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg ${
+                  a.earned ? "bg-zinc-900" : "bg-zinc-900/40 opacity-50"
+                }`}
+              >
+                <img
+                  src={`https://i.retroachievements.org/Badge/${a.badgeName}${a.earned ? "" : "_lock"}.png`}
+                  alt=""
+                  className="w-6 h-6 rounded shrink-0"
+                  onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                />
+                <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
+                {a.earned && <span className="ml-auto text-amber-400 shrink-0">✓</span>}
+              </li>
+            ))}
+          </ul>
+          {data.achievements.length > 6 && (
+            <button
+              onClick={() => setShowAll(!showAll)}
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors mt-2"
+            >
+              {showAll ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {showAll ? "Ver menos" : `Ver todas (${data.achievements.length})`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onUpdateRaGameId, onRemove }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [showHistory, setShowHistory] = useState(false);
@@ -844,6 +966,9 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
               </button>
             ))}
           </div>
+
+          {/* conquistas via RetroAchievements */}
+          <RetroAchievementsSection game={game} onUpdateRaGameId={onUpdateRaGameId} />
 
           {/* objetivos */}
           <div className="mb-5">

@@ -5,7 +5,7 @@
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
@@ -126,6 +126,73 @@ Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
   return json({ text, usedGrounding, fellBackFromQuota });
 }
 
+async function handleRetroAchievements(request, env) {
+  const url = new URL(request.url);
+  const gameId = url.searchParams.get("gameId");
+
+  if (!gameId) {
+    return json({ error: "Falta o parâmetro gameId." }, 400);
+  }
+
+  const username = env.RA_USERNAME;
+  const apiKey = env.RA_API_KEY;
+  if (!username || !apiKey) {
+    return json(
+      { error: "RA_USERNAME e/ou RA_API_KEY não configurados no servidor (Settings > Variables and Secrets)." },
+      500
+    );
+  }
+
+  const raUrl = `https://retroachievements.org/API/API_GetGameInfoAndUserProgress.php?g=${encodeURIComponent(
+    gameId
+  )}&u=${encodeURIComponent(username)}&y=${encodeURIComponent(apiKey)}`;
+
+  let raResponse;
+  try {
+    raResponse = await fetch(raUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+
+  if (!raResponse.ok) {
+    const errText = await raResponse.text().catch(() => "");
+    return json({ error: `RetroAchievements retornou erro ${raResponse.status}: ${errText.slice(0, 300)}` }, 502);
+  }
+
+  const data = await raResponse.json().catch(() => null);
+  if (!data || !data.Title) {
+    return json({ error: "ID de jogo não encontrado no RetroAchievements. Confira o número na URL do jogo no site." }, 404);
+  }
+
+  // Devolve só o que a UI precisa, num formato mais simples que o bruto da RA.
+  const achievements = Object.values(data.Achievements || {}).map((a) => ({
+    id: a.ID,
+    title: a.Title,
+    description: a.Description,
+    points: a.Points,
+    badgeName: a.BadgeName,
+    earned: Boolean(a.DateEarned),
+    earnedHardcore: Boolean(a.DateEarnedHardcore),
+    dateEarned: a.DateEarned || null,
+  }));
+
+  // Conquistas destravadas primeiro (mais recentes), depois as que faltam.
+  achievements.sort((a, b) => {
+    if (a.earned !== b.earned) return a.earned ? -1 : 1;
+    return 0;
+  });
+
+  return json({
+    gameTitle: data.Title,
+    consoleName: data.ConsoleName,
+    imageIcon: data.ImageIcon,
+    numAchievements: data.NumAchievements || 0,
+    numAwardedToUser: data.NumAwardedToUser || 0,
+    userCompletion: data.UserCompletion || "0.00%",
+    achievements,
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -136,6 +203,16 @@ export default {
       }
       if (request.method === "POST") {
         return handleAnalyze(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/retroachievements") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleRetroAchievements(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
