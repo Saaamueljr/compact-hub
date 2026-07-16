@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
-  AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp
+  AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
+  Star, Users
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -23,14 +24,42 @@ const TIER_META = {
   1: { label: "Não roda", dot: "bg-red-500", text: "text-red-300", border: "border-red-600" },
 };
 
-const DEFAULT_PROFILE = {
-  cpu: "Core 2 Quad Q9500",
-  gpu: "GTX 750 Ti 1GB",
-  ram: "8GB DDR2",
-  os: "Windows 10 LTSC 2019 (1809)",
-  preferences:
-    "Prefiro estabilidade a gráficos altos. Aceito baixar resolução/textura antes de travar fps. Não me importo de aplicar patches da comunidade quando necessário.",
-};
+const STATUSES = [
+  { id: "backlog", label: "Quero jogar", badge: "bg-zinc-800 text-zinc-300 border border-zinc-600" },
+  { id: "playing", label: "Jogando", badge: "bg-sky-900 text-sky-300 border border-sky-700" },
+  { id: "completed", label: "Zerado", badge: "bg-emerald-900 text-emerald-300 border border-emerald-700" },
+  { id: "abandoned", label: "Abandonado", badge: "bg-red-900 text-red-300 border border-red-700" },
+];
+
+function statusOf(id) {
+  return STATUSES.find((s) => s.id === id) || null;
+}
+
+function makeProfile(name, overrides = {}) {
+  return {
+    id: uid(),
+    name,
+    cpu: "",
+    gpu: "",
+    ram: "",
+    os: "",
+    preferences: "",
+    ...overrides,
+  };
+}
+
+const DEFAULT_PROFILES = [
+  {
+    id: "default-profile",
+    name: "Principal",
+    cpu: "Core 2 Quad Q9500",
+    gpu: "GTX 750 Ti 1GB",
+    ram: "8GB DDR2",
+    os: "Windows 10 LTSC 2019 (1809)",
+    preferences:
+      "Prefiro estabilidade a gráficos altos. Aceito baixar resolução/textura antes de travar fps. Não me importo de aplicar patches da comunidade quando necessário.",
+  },
+];
 
 // --- Persistência local (substitui window.storage do ambiente de artifact) ---
 // Fora do Claude.ai, localStorage funciona normalmente. Os dados ficam só
@@ -140,12 +169,15 @@ function TierBadge({ tier, tierLabel, size = "sm" }) {
 }
 
 export default function CompatHub() {
-  const [profile, setProfile] = useState(DEFAULT_PROFILE);
+  const [profiles, setProfiles] = useState(DEFAULT_PROFILES);
+  const [activeProfileId, setActiveProfileId] = useState(DEFAULT_PROFILES[0].id);
   const [games, setGames] = useState([]);
   const [loaded, setLoaded] = useState(false);
 
   const [query, setQuery] = useState("");
   const [platformFilter, setPlatformFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
 
   const [showAdd, setShowAdd] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -154,13 +186,24 @@ export default function CompatHub() {
   const [analyzing, setAnalyzing] = useState({});
   const [errors, setErrors] = useState({});
 
+  const profile = profiles.find((p) => p.id === activeProfileId) || profiles[0];
+
   useEffect(() => {
     (async () => {
       try {
         const res = await storage.get(STORAGE_KEY);
         if (res && res.value) {
           const parsed = JSON.parse(res.value);
-          setProfile(parsed.profile || DEFAULT_PROFILE);
+          // Migração: dados antigos tinham um único "profile". Se não existir
+          // "profiles" (array novo), converte o antigo em perfil "Principal".
+          if (parsed.profiles && parsed.profiles.length > 0) {
+            setProfiles(parsed.profiles);
+            setActiveProfileId(parsed.activeProfileId || parsed.profiles[0].id);
+          } else if (parsed.profile) {
+            const migrated = [{ id: "default-profile", name: "Principal", ...parsed.profile }];
+            setProfiles(migrated);
+            setActiveProfileId(migrated[0].id);
+          }
           setGames(parsed.games || []);
         }
       } catch {
@@ -171,9 +214,12 @@ export default function CompatHub() {
     })();
   }, []);
 
-  async function persist(nextProfile, nextGames) {
+  async function persist(nextProfiles, nextActiveProfileId, nextGames) {
     try {
-      await storage.set(STORAGE_KEY, JSON.stringify({ profile: nextProfile, games: nextGames }));
+      await storage.set(
+        STORAGE_KEY,
+        JSON.stringify({ profiles: nextProfiles, activeProfileId: nextActiveProfileId, games: nextGames })
+      );
     } catch (e) {
       console.error("Erro ao salvar:", e);
     }
@@ -181,12 +227,18 @@ export default function CompatHub() {
 
   function updateGames(nextGames) {
     setGames(nextGames);
-    persist(profile, nextGames);
+    persist(profiles, activeProfileId, nextGames);
   }
 
-  function updateProfile(nextProfile) {
-    setProfile(nextProfile);
-    persist(nextProfile, games);
+  function updateProfiles(nextProfiles, nextActiveProfileId) {
+    setProfiles(nextProfiles);
+    setActiveProfileId(nextActiveProfileId);
+    persist(nextProfiles, nextActiveProfileId, games);
+  }
+
+  function switchProfile(id) {
+    setActiveProfileId(id);
+    persist(profiles, id, games);
   }
 
   function addGame({ name, platform, steamAppId, coverUrl }) {
@@ -200,11 +252,25 @@ export default function CompatHub() {
       goals: "",
       notes: [],
       analyses: [],
+      favorite: false,
+      status: null,
       createdAt: new Date().toISOString(),
     };
     updateGames([newGame, ...games]);
     setShowAdd(false);
     setActiveGameId(newGame.id);
+  }
+
+  function toggleFavorite(id) {
+    const game = games.find((g) => g.id === id);
+    if (!game) return;
+    updateGame(id, { favorite: !game.favorite });
+  }
+
+  function setGameStatus(id, status) {
+    const game = games.find((g) => g.id === id);
+    if (!game) return;
+    updateGame(id, { status: game.status === status ? null : status });
   }
 
   function removeGame(id) {
@@ -250,10 +316,30 @@ export default function CompatHub() {
   const filteredGames = games.filter((g) => {
     const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
     const matchesPlatform = platformFilter === "all" || g.platform === platformFilter;
-    return matchesQuery && matchesPlatform;
+    const matchesStatus = statusFilter === "all" || g.status === statusFilter;
+    const matchesFavorite = !onlyFavorites || g.favorite;
+    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
+
+  // Dashboard: contadores simples calculados a partir dos dados que já existem.
+  const stats = games.reduce(
+    (acc, g) => {
+      acc.total += 1;
+      const latest = (g.analyses || [])[0];
+      if (latest) {
+        acc.analyzed += 1;
+        if (latest.tier === 5) acc.excellent += 1;
+        else if (latest.tier === 4) acc.good += 1;
+        else if (latest.tier === 3) acc.ok += 1;
+        else if (latest.tier === 2) acc.bad += 1;
+        else if (latest.tier === 1) acc.incompatible += 1;
+      }
+      return acc;
+    },
+    { total: 0, analyzed: 0, excellent: 0, good: 0, ok: 0, bad: 0, incompatible: 0 }
+  );
 
   if (!loaded) {
     return (
@@ -278,10 +364,19 @@ export default function CompatHub() {
             </div>
           </div>
 
-          <div className="hidden md:flex items-center gap-2 text-xs text-zinc-400 ml-2">
-            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800">{profile.cpu}</span>
-            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800">{profile.gpu}</span>
-            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800">{profile.ram}</span>
+          <div className="hidden md:flex items-center gap-2 ml-2">
+            <select
+              value={activeProfileId}
+              onChange={(e) => switchProfile(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-xs text-zinc-300 outline-none max-w-[140px]"
+            >
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.cpu}</span>
+            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.gpu}</span>
+            <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.ram}</span>
           </div>
 
           <button
@@ -289,10 +384,49 @@ export default function CompatHub() {
             className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
           >
             <Settings2 className="w-3.5 h-3.5" />
-            Configuração
+            Perfis de hardware
           </button>
         </div>
       </div>
+
+      {/* dashboard simples */}
+      {stats.total > 0 && (
+        <div className="max-w-6xl mx-auto px-5 pt-5">
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
+              <b className="text-zinc-100">{stats.total}</b> jogos
+            </span>
+            <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400">
+              <b className="text-zinc-200">{stats.analyzed}</b> analisados
+            </span>
+            {stats.excellent > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-emerald-800 text-emerald-300">
+                <b>{stats.excellent}</b> excelentes
+              </span>
+            )}
+            {stats.good > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-sky-800 text-sky-300">
+                <b>{stats.good}</b> bons
+              </span>
+            )}
+            {stats.ok > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-amber-800 text-amber-300">
+                <b>{stats.ok}</b> ok
+              </span>
+            )}
+            {stats.bad > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-orange-800 text-orange-300">
+                <b>{stats.bad}</b> ruins
+              </span>
+            )}
+            {stats.incompatible > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-red-800 text-red-300">
+                <b>{stats.incompatible}</b> incompatíveis
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* toolbar */}
       <div className="max-w-6xl mx-auto px-5 pt-6 flex flex-wrap items-center gap-3">
@@ -316,6 +450,29 @@ export default function CompatHub() {
             <option key={p.id} value={p.id}>{p.label}</option>
           ))}
         </select>
+
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-300 outline-none"
+        >
+          <option value="all">Todos os status</option>
+          {STATUSES.map((s) => (
+            <option key={s.id} value={s.id}>{s.label}</option>
+          ))}
+        </select>
+
+        <button
+          onClick={() => setOnlyFavorites(!onlyFavorites)}
+          className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm border transition-colors ${
+            onlyFavorites
+              ? "bg-amber-900/40 border-amber-700 text-amber-300"
+              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Star className={`w-4 h-4 ${onlyFavorites ? "fill-amber-400" : ""}`} />
+          Favoritos
+        </button>
 
         <button
           onClick={() => setShowAdd(true)}
@@ -349,28 +506,41 @@ export default function CompatHub() {
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {filteredGames.map((game) => {
               const latest = (game.analyses || [])[0];
+              const gameStatus = statusOf(game.status);
               return (
-                <button
+                <div
                   key={game.id}
-                  onClick={() => setActiveGameId(game.id)}
-                  className="text-left group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-zinc-600 transition-colors"
+                  className="text-left group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-zinc-600 transition-colors relative"
                 >
-                  <div className="relative">
-                    <CoverThumb game={game} className="aspect-video group-hover:opacity-90 transition-opacity" />
-                    <div className="absolute top-2 right-2">
-                      <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleFavorite(game.id); }}
+                    className="absolute top-2 left-2 z-10 w-7 h-7 rounded-full bg-black/60 backdrop-blur flex items-center justify-center hover:bg-black/80 transition-colors"
+                    aria-label="Favoritar"
+                  >
+                    <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-300"}`} />
+                  </button>
+                  <button onClick={() => setActiveGameId(game.id)} className="text-left w-full">
+                    <div className="relative">
+                      <CoverThumb game={game} className="aspect-video group-hover:opacity-90 transition-opacity" />
+                      <div className="absolute top-2 right-2">
+                        <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
+                      </div>
                     </div>
-                  </div>
-                  <div className="p-3">
-                    <p className="text-sm font-medium line-clamp-1">{game.name}</p>
-                    <div className="flex items-center justify-between mt-2">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-                        {platformOf(game.platform).label}
-                      </span>
-                      {latest && <span className="text-xs text-zinc-600">{formatDate(latest.date)}</span>}
+                    <div className="p-3">
+                      <p className="text-sm font-medium line-clamp-1">{game.name}</p>
+                      <div className="flex items-center justify-between mt-2 gap-2">
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
+                          {platformOf(game.platform).label}
+                        </span>
+                        {gameStatus && (
+                          <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${gameStatus.badge}`}>
+                            {gameStatus.label}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -380,12 +550,13 @@ export default function CompatHub() {
       {/* modal: adicionar jogo */}
       {showAdd && <AddGameModal games={games} onClose={() => setShowAdd(false)} onAdd={addGame} />}
 
-      {/* modal: perfil / hardware */}
+      {/* modal: perfis de hardware */}
       {showProfile && (
         <ProfileModal
-          profile={profile}
+          profiles={profiles}
+          activeProfileId={activeProfileId}
           onClose={() => setShowProfile(false)}
-          onSave={(p) => { updateProfile(p); setShowProfile(false); }}
+          onSave={(nextProfiles, nextActiveId) => { updateProfiles(nextProfiles, nextActiveId); setShowProfile(false); }}
         />
       )}
 
@@ -399,6 +570,8 @@ export default function CompatHub() {
           onAnalyze={() => analyze(activeGame.id)}
           onAddNote={(text) => addNote(activeGame.id, text)}
           onUpdateGoals={(goals) => updateGame(activeGame.id, { goals })}
+          onToggleFavorite={() => toggleFavorite(activeGame.id)}
+          onSetStatus={(status) => setGameStatus(activeGame.id, status)}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -516,21 +689,81 @@ function AddGameModal({ games, onClose, onAdd }) {
   );
 }
 
-function ProfileModal({ profile, onClose, onSave }) {
-  const [form, setForm] = useState(profile);
+function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
+  const [list, setList] = useState(profiles);
+  const [editingId, setEditingId] = useState(activeProfileId);
+  const editing = list.find((p) => p.id === editingId) || list[0];
+
+  function updateField(field, value) {
+    setList(list.map((p) => (p.id === editing.id ? { ...p, [field]: value } : p)));
+  }
+
+  function addProfile() {
+    const created = makeProfile(`Perfil ${list.length + 1}`);
+    setList([...list, created]);
+    setEditingId(created.id);
+  }
+
+  function removeProfile(id) {
+    if (list.length === 1) {
+      window.alert("Precisa manter ao menos um perfil de hardware.");
+      return;
+    }
+    if (!window.confirm("Remover este perfil de hardware?")) return;
+    const next = list.filter((p) => p.id !== id);
+    setList(next);
+    if (editingId === id) setEditingId(next[0].id);
+  }
 
   return (
-    <ModalShell onClose={onClose}>
+    <ModalShell onClose={onClose} maxW="max-w-xl">
       <div className="p-6">
-        <h2 className="text-base font-semibold mb-1">Sua configuração</h2>
-        <p className="text-xs text-zinc-500 mb-5">Usado em toda análise. Atualize quando trocar de peça.</p>
+        <h2 className="text-base font-semibold mb-1">Perfis de hardware</h2>
+        <p className="text-xs text-zinc-500 mb-4">
+          Crie um perfil pra cada PC (ex: Retrô, Principal, Notebook) e troque com um clique no topo da tela.
+        </p>
+
+        {/* abas dos perfis */}
+        <div className="flex flex-wrap gap-2 mb-5">
+          {list.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setEditingId(p.id)}
+              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                editing.id === p.id
+                  ? "bg-indigo-600 border-indigo-500 text-white"
+                  : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Users className="w-3 h-3" />
+              {p.name || "Sem nome"}
+            </button>
+          ))}
+          <button
+            onClick={addProfile}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-dashed border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition-colors"
+          >
+            <Plus className="w-3 h-3" /> Novo perfil
+          </button>
+        </div>
+
+        {/* edição do perfil selecionado */}
+        <div className="mb-4">
+          <label className="text-xs text-zinc-400 mb-1 block uppercase">Nome do perfil</label>
+          <input
+            value={editing.name}
+            onChange={(e) => updateField("name", e.target.value)}
+            placeholder="ex: PC Retrô"
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+          />
+        </div>
 
         {["cpu", "gpu", "ram", "os"].map((field) => (
           <div key={field} className="mb-4">
             <label className="text-xs text-zinc-400 mb-1 block uppercase">{field}</label>
             <input
-              value={form[field]}
-              onChange={(e) => setForm({ ...form, [field]: e.target.value })}
+              value={editing[field]}
+              onChange={(e) => updateField(field, e.target.value)}
               className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
             />
           </div>
@@ -538,19 +771,26 @@ function ProfileModal({ profile, onClose, onSave }) {
 
         <label className="text-xs text-zinc-400 mb-1 block">Preferências gerais / objetivos</label>
         <textarea
-          value={form.preferences}
-          onChange={(e) => setForm({ ...form, preferences: e.target.value })}
+          value={editing.preferences}
+          onChange={(e) => updateField("preferences", e.target.value)}
           rows={3}
           placeholder="ex: prefiro estabilidade a gráficos, aceito rodar em 720p..."
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-6 outline-none focus:border-indigo-600 resize-none"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-indigo-600 resize-none"
         />
+
+        <button
+          onClick={() => removeProfile(editing.id)}
+          className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-red-400 transition-colors mb-6"
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Remover este perfil
+        </button>
 
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="text-sm text-zinc-400 hover:text-zinc-200 px-4 py-2 transition-colors">
             Cancelar
           </button>
           <button
-            onClick={() => onSave(form)}
+            onClick={() => onSave(list, list.some((p) => p.id === editingId) ? editingId : list[0].id)}
             className="bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2"
           >
             Salvar
@@ -561,7 +801,7 @@ function ProfileModal({ profile, onClose, onSave }) {
   );
 }
 
-function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote, onUpdateGoals, onRemove }) {
+function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onRemove }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [showHistory, setShowHistory] = useState(false);
@@ -575,11 +815,35 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
         <div className="p-6">
           <div className="flex items-start justify-between gap-3 mb-1">
             <h2 className="text-lg font-semibold">{game.name}</h2>
-            <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-              {platformOf(game.platform).label}
-            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={onToggleFavorite}
+                className="w-7 h-7 rounded-full bg-zinc-950 border border-zinc-800 flex items-center justify-center hover:border-zinc-600 transition-colors"
+                aria-label="Favoritar"
+              >
+                <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-400"}`} />
+              </button>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
+                {platformOf(game.platform).label}
+              </span>
+            </div>
           </div>
-          <p className="text-xs text-zinc-500 mb-6">adicionado em {formatDate(game.createdAt)}</p>
+          <p className="text-xs text-zinc-500 mb-4">adicionado em {formatDate(game.createdAt)}</p>
+
+          {/* status: quero jogar / jogando / zerado / abandonado */}
+          <div className="flex flex-wrap gap-1.5 mb-6">
+            {STATUSES.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => onSetStatus(s.id)}
+                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                  game.status === s.id ? s.badge : "bg-transparent border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
 
           {/* objetivos */}
           <div className="mb-5">

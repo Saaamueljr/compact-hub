@@ -1,5 +1,5 @@
 {
-  "name": "compacthub",
+  "name": "compat-hub",
   "compatibility_date": "2026-07-15",
   "main": "worker/index.js",
   "assets": {
