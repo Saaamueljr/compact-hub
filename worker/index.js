@@ -53,6 +53,7 @@ Considere sempre:
 - Remasters/remakes recentes de jogos antigos costumam ter requisitos bem mais altos que a versão original.
 - Use a busca quando precisar confirmar requisitos mínimos/recomendados atualizados, principalmente para jogos recentes ou pouco conhecidos.
 - Leve em conta o histórico de problemas já relatados e os objetivos do usuário para este jogo, se houver.
+- IMPORTANTE sobre emuladores: se o usuário especificar qual emulador (e principalmente qual VERSÃO do emulador) vai usar, baseie sua análise NESSA versão específica, não na versão mais recente. Emuladores mais antigos costumam ser mais leves e compatíveis com hardware fraco/sem AVX, mesmo quando versões recentes do mesmo emulador pesam mais ou exigem instruções que a CPU não tem. Não presuma que o usuário vai usar a última versão a menos que ele diga isso.
 
 Responda SOMENTE com um JSON válido, sem nenhum texto antes ou depois, sem markdown, sem crases, no formato exato:
 {
@@ -66,6 +67,7 @@ Responda SOMENTE com um JSON válido, sem nenhum texto antes ou depois, sem mark
 
   const userPrompt = `Jogo: ${game.name}
 Plataforma: ${platformLabel || "não informado"}
+Rodando via (emulador/executável especificado pelo usuário): ${game.runningVia || "não especificado"}
 Histórico de problemas registrados para este jogo: ${notesText || "nenhum registrado ainda"}
 Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
 
@@ -164,6 +166,27 @@ async function handleRetroAchievements(request, env) {
     return json({ error: "ID de jogo não encontrado no RetroAchievements. Confira o número na URL do jogo no site." }, 404);
   }
 
+  // "Última vez jogado" vem de um endpoint separado (histórico recente do
+  // usuário). Nem todo jogo aparece aqui — só os jogados nos últimos períodos.
+  // OBS: o RetroAchievements NÃO rastreia "horas jogadas" de forma confiável
+  // pro PCSX2 (é uma limitação conhecida do próprio serviço, não do app).
+  let lastPlayed = null;
+  try {
+    const recentUrl = `https://retroachievements.org/API/API_GetUserRecentlyPlayedGames.php?u=${encodeURIComponent(
+      username
+    )}&y=${encodeURIComponent(apiKey)}&c=100`;
+    const recentResponse = await fetch(recentUrl);
+    if (recentResponse.ok) {
+      const recentData = await recentResponse.json().catch(() => []);
+      const match = Array.isArray(recentData)
+        ? recentData.find((g) => String(g.GameID) === String(gameId))
+        : null;
+      if (match) lastPlayed = match.LastPlayed || null;
+    }
+  } catch {
+    // não é crítico — se falhar, simplesmente não mostra "última vez jogado"
+  }
+
   // Devolve só o que a UI precisa, num formato mais simples que o bruto da RA.
   const achievements = Object.values(data.Achievements || {}).map((a) => ({
     id: a.ID,
@@ -190,6 +213,7 @@ async function handleRetroAchievements(request, env) {
     numAchievements: data.NumAchievements || 0,
     numAwardedToUser: data.NumAwardedToUser || 0,
     userCompletion: data.UserCompletion || "0.00%",
+    lastPlayed,
     achievements,
   });
 }

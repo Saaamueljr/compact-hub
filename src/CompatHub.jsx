@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy
+  Star, Users, Trophy, CheckCircle2
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -193,6 +193,7 @@ export default function CompatHub() {
   const [platformFilter, setPlatformFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const [showAdd, setShowAdd] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -269,6 +270,8 @@ export default function CompatHub() {
       analyses: [],
       favorite: false,
       status: null,
+      franchise: "",
+      runningVia: "",
       createdAt: new Date().toISOString(),
     };
     updateGames([newGame, ...games]);
@@ -333,12 +336,15 @@ export default function CompatHub() {
     }
   }
 
+  const franchises = Array.from(new Set(games.map((g) => g.franchise).filter(Boolean))).sort();
+
   const filteredGames = games.filter((g) => {
     const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
     const matchesPlatform = platformFilter === "all" || g.platform === platformFilter;
     const matchesStatus = statusFilter === "all" || g.status === statusFilter;
     const matchesFavorite = !onlyFavorites || g.favorite;
-    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite;
+    const matchesFranchise = franchiseFilter === "all" || g.franchise === franchiseFilter;
+    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesFranchise;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
@@ -484,6 +490,19 @@ export default function CompatHub() {
           ))}
         </select>
 
+        {franchises.length > 0 && (
+          <select
+            value={franchiseFilter}
+            onChange={(e) => setFranchiseFilter(e.target.value)}
+            className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-300 outline-none"
+          >
+            <option value="all">Todas as franquias</option>
+            {franchises.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        )}
+
         <button
           onClick={() => setOnlyFavorites(!onlyFavorites)}
           className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm border transition-colors ${
@@ -547,6 +566,14 @@ export default function CompatHub() {
                       <div className="absolute top-2 right-2">
                         <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
                       </div>
+                      {game.status === "completed" && (
+                        <div
+                          className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-emerald-600 flex items-center justify-center"
+                          title="Zerado"
+                        >
+                          <CheckCircle2 className="w-4 h-4 text-white" />
+                        </div>
+                      )}
                     </div>
                     <div className="p-3">
                       <p className="text-sm font-medium line-clamp-1">{game.name}</p>
@@ -601,6 +628,7 @@ export default function CompatHub() {
           error={errors[activeGame.id]}
           activeProfileId={activeProfileId}
           activeProfileName={profile.name}
+          profiles={profiles}
           onClose={() => setActiveGameId(null)}
           onAnalyze={() => analyze(activeGame.id)}
           onAddNote={(text) => addNote(activeGame.id, text)}
@@ -609,9 +637,11 @@ export default function CompatHub() {
           onSetStatus={(status) => setGameStatus(activeGame.id, status)}
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
           onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
+          onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
           onUpdateCoverFromRA={(coverUrl) => updateGame(activeGame.id, { coverUrl })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
           onCacheRaProgress={(raProgress) => updateGame(activeGame.id, { raProgress })}
+          onUpdateNameAndIconFromRA={(name, raIconUrl) => updateGame(activeGame.id, { name, raIconUrl })}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -841,7 +871,9 @@ function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
   );
 }
 
-function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress }) {
+function RetroAchievementsSection({
+  game, onUpdateRaGameId, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress, onUpdateNameAndIconFromRA,
+}) {
   const [gameIdInput, setGameIdInput] = useState(game.raGameId || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -865,6 +897,8 @@ function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA,
       if (!game.coverUrl && body.boxArtUrl) {
         onUpdateCoverFromRA(body.boxArtUrl);
       }
+      // Nome e ícone do jogo sempre alinhados com o título oficial do RA.
+      onUpdateNameAndIconFromRA(body.gameTitle, body.imageIcon);
     } catch (e) {
       setError(e.message);
       setData(null);
@@ -877,8 +911,18 @@ function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA,
   useEffect(() => {
     if (game.raGameId) fetchProgress(game.raGameId);
     setTranslations(game.raTranslations || {});
+    setGameIdInput(game.raGameId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id]);
+
+  // Salva o ID assim que o campo perde o foco — sem isso, digitar o ID e só
+  // fechar o card sem clicar no botão perdia a informação (bug reportado).
+  function handleBlurSave() {
+    const trimmed = gameIdInput.trim();
+    if (trimmed !== (game.raGameId || "")) {
+      onUpdateRaGameId(trimmed);
+    }
+  }
 
   function handleSave() {
     const trimmed = gameIdInput.trim();
@@ -931,6 +975,7 @@ function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA,
         <input
           value={gameIdInput}
           onChange={(e) => setGameIdInput(e.target.value)}
+          onBlur={handleBlurSave}
           onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
           placeholder="ID do jogo no RetroAchievements (ex: 14402)"
           className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600 font-mono"
@@ -969,6 +1014,15 @@ function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA,
           <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-3">
             <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
           </div>
+
+          {data.lastPlayed ? (
+            <p className="text-xs text-zinc-500 mb-3">Última vez jogado: {formatDate(data.lastPlayed)}</p>
+          ) : (
+            <p className="text-xs text-zinc-600 mb-3">
+              Sem registro de "última vez jogado" ainda (o RetroAchievements não rastreia horas jogadas de forma
+              confiável no PCSX2 — só a data mais recente, quando disponível).
+            </p>
+          )}
 
           <button
             onClick={handleTranslate}
@@ -1021,30 +1075,25 @@ function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA,
 }
 
 function GameDetailModal({
-  game, analyzing, error, activeProfileId, activeProfileName,
+  game, analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus,
-  onUpdateRaGameId, onUpdateRunningVia, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress, onRemove,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress,
+  onUpdateNameAndIconFromRA, onRemove,
 }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
+  const [franchiseText, setFranchiseText] = useState(game.franchise || "");
   const [showHistory, setShowHistory] = useState(false);
+  const [viewedProfileId, setViewedProfileId] = useState(activeProfileId);
   const allAnalyses = game.analyses || [];
 
-  // Analiese feitas antes de existir múltiplos perfis não têm profileId — nesse
-  // caso, tratamos como pertencentes a qualquer perfil (não some do histórico).
-  const analysesForActiveProfile = allAnalyses.filter((a) => !a.profileId || a.profileId === activeProfileId);
-  const latest = analysesForActiveProfile[0];
-  const older = analysesForActiveProfile.slice(1);
-
-  // Resumo rápido: última análise feita em CADA outro perfil (não o ativo).
-  const otherProfilesMap = new Map();
-  for (const a of allAnalyses) {
-    if (a.profileId && a.profileId !== activeProfileId && !otherProfilesMap.has(a.profileId)) {
-      otherProfilesMap.set(a.profileId, a);
-    }
-  }
-  const otherProfilesLatest = Array.from(otherProfilesMap.values());
+  // Aba de perfil selecionada pra VER o histórico (pode ser diferente do
+  // perfil ativo no topo da tela — nova análise sempre usa o perfil ativo).
+  const analysesForViewedProfile = allAnalyses.filter((a) => !a.profileId || a.profileId === viewedProfileId);
+  const latest = analysesForViewedProfile[0];
+  const older = analysesForViewedProfile.slice(1);
+  const viewedProfile = profiles.find((p) => p.id === viewedProfileId);
 
   return (
     <ModalShell onClose={onClose} maxW="max-w-2xl">
@@ -1052,7 +1101,12 @@ function GameDetailModal({
         <CoverThumb game={game} className="w-full aspect-video" />
         <div className="p-6">
           <div className="flex items-start justify-between gap-3 mb-1">
-            <h2 className="text-lg font-semibold">{game.name}</h2>
+            <div className="flex items-center gap-2 min-w-0">
+              {game.raIconUrl && (
+                <img src={game.raIconUrl} alt="" className="w-7 h-7 rounded shrink-0" />
+              )}
+              <h2 className="text-lg font-semibold truncate">{game.name}</h2>
+            </div>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={onToggleFavorite}
@@ -1090,6 +1144,7 @@ function GameDetailModal({
             onUpdateCoverFromRA={onUpdateCoverFromRA}
             onSaveTranslations={onSaveTranslations}
             onCacheRaProgress={onCacheRaProgress}
+            onUpdateNameAndIconFromRA={onUpdateNameAndIconFromRA}
           />
 
           {/* rodando via: emulador ou executável */}
@@ -1102,7 +1157,7 @@ function GameDetailModal({
               value={runningViaText}
               onChange={(e) => setRunningViaText(e.target.value)}
               onBlur={() => onUpdateRunningVia(runningViaText)}
-              placeholder="ex: PCSX2, RPCS3, Executável nativo, Steam..."
+              placeholder="ex: PCSX2 v1.6.0 (versão antiga, mais leve)"
               className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
             />
             <datalist id="running-via-options">
@@ -1110,6 +1165,28 @@ function GameDetailModal({
                 <option key={opt} value={opt} />
               ))}
             </datalist>
+            <p className="text-xs text-zinc-600 mt-1">
+              Se você já sabe que vai usar uma versão específica (ex: uma mais antiga por compatibilidade), inclua
+              aqui — a análise passa a considerar isso em vez de assumir a versão mais recente.
+            </p>
+          </div>
+
+          {/* franquia */}
+          <div className="mb-5">
+            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+              <Users className="w-3.5 h-3.5" /> Franquia
+            </div>
+            <input
+              value={franchiseText}
+              onChange={(e) => setFranchiseText(e.target.value)}
+              onBlur={() => onUpdateFranchise(franchiseText)}
+              placeholder="ex: God of War, Mafia, Resident Evil..."
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+            />
+            <p className="text-xs text-zinc-600 mt-1">
+              Jogos com a mesma franquia (mesmo texto) ficam agrupados no filtro "Franquia" da tela principal —
+              útil pra maratonar uma série e ver de cara quais já estão zerados.
+            </p>
           </div>
 
           {/* objetivos */}
@@ -1159,15 +1236,16 @@ function GameDetailModal({
             </div>
           </div>
 
-          {/* analisar */}
+          {/* analisar — sempre roda com o perfil ativo no topo da tela */}
           <button
             onClick={onAnalyze}
             disabled={analyzing}
-            className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2.5 mb-4"
+            className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2.5 mb-1.5"
           >
             {analyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {analyzing ? "Analisando com base no seu hardware..." : "Analisar compatibilidade agora"}
           </button>
+          <p className="text-xs text-zinc-600 text-center mb-4">roda com o perfil ativo: {activeProfileName}</p>
 
           {error && (
             <div className="flex items-start gap-2 text-sm text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-4">
@@ -1176,14 +1254,38 @@ function GameDetailModal({
             </div>
           )}
 
-          {/* resultado */}
-          {latest && (
+          {/* abas: escolha qual perfil ver o histórico de análises */}
+          {profiles.length > 1 && (
+            <div className="flex flex-wrap gap-1.5 mb-3">
+              {profiles.map((p) => {
+                const hasAnalysis = allAnalyses.some((a) => (a.profileId || activeProfileId) === p.id);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setViewedProfileId(p.id)}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                      viewedProfileId === p.id
+                        ? "bg-indigo-600 border-indigo-500 text-white"
+                        : hasAnalysis
+                        ? "bg-zinc-900 border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                        : "bg-transparent border-zinc-800 text-zinc-600"
+                    }`}
+                  >
+                    {p.name}{!hasAnalysis && " (sem análise)"}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* resultado do perfil selecionado na aba */}
+          {latest ? (
             <div className={`rounded-xl border ${TIER_META[latest.tier]?.border || "border-zinc-700"} bg-zinc-950 p-4 mb-3`}>
               <div className="flex items-center justify-between mb-2">
                 <TierBadge tier={latest.tier} tierLabel={latest.tierLabel} size="lg" />
                 <div className="text-right">
                   <span className="text-xs text-zinc-600 block">{formatDate(latest.date)}</span>
-                  <span className="text-xs text-zinc-500">perfil: {latest.profileName || activeProfileName}</span>
+                  <span className="text-xs text-zinc-500">perfil: {latest.profileName || viewedProfile?.name}</span>
                 </div>
               </div>
               <p className="text-sm font-medium mb-1.5">{latest.veredito}</p>
@@ -1204,19 +1306,13 @@ function GameDetailModal({
                 </ul>
               )}
             </div>
-          )}
-
-          {/* resumo rápido de como esse jogo se sai em outros perfis já testados */}
-          {otherProfilesLatest.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 mb-4">
-              <span className="text-xs text-zinc-600">também testado em:</span>
-              {otherProfilesLatest.map((a) => (
-                <span key={a.profileId} className="flex items-center gap-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-full px-2 py-1">
-                  <TierBadge tier={a.tier} tierLabel={a.tierLabel} />
-                  <span className="text-zinc-400">{a.profileName}</span>
-                </span>
-              ))}
-            </div>
+          ) : (
+            viewedProfileId !== activeProfileId && (
+              <p className="text-xs text-zinc-600 mb-3">
+                Ainda não analisado no perfil "{viewedProfile?.name}". Troque o perfil ativo no topo da tela pra
+                {" "}"{viewedProfile?.name}" e clique em analisar.
+              </p>
+            )
           )}
 
           {older.length > 0 && (

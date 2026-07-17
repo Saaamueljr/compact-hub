@@ -66,7 +66,25 @@ Se você não configurou a variável antes do primeiro deploy, sem problema: adi
 - Abra a URL do deploy, clique em "Adicionar jogo", adicione um jogo qualquer
 - Clique em "Analisar compatibilidade agora"
 - Se der erro `GEMINI_API_KEY não configurada`, confirme que salvou a variável no passo 4 e refaça o deploy
-- Pra testar o RetroAchievements: abra um jogo que tenha suporte no RA, cole o ID do jogo (número que aparece na URL dele em retroachievements.org) no campo "RetroAchievements" e clique no botão de atualizar
+- Pra testar o RetroAchievements: abra um jogo que tenha suporte no RA, cole o ID do jogo (número que aparece na URL dele em retroachievements.org) no campo "RetroAchievements" e clique no botão de atualizar — a capa é preenchida automaticamente se o jogo ainda não tiver uma
+
+## Novidades desta versão
+
+- **Análises separadas por perfil de hardware:** cada análise agora guarda qual perfil foi usado. O resultado mostrado é sempre o do perfil ativo no momento; um resumo mostra rapidamente o resultado em outros perfis já testados
+- **Capa automática via RetroAchievements:** se o jogo tiver um ID do RA vinculado e ainda não tiver capa manual, a boxart oficial do RA é usada
+- **Tradução de conquistas:** botão "Traduzir para português" na seção de conquistas, usando o Gemini. As traduções ficam salvas (não precisa traduzir de novo depois)
+- **Campo "Rodando via":** pra anotar qual emulador ou executável você usa pra rodar aquele jogo específico
+- **Contador de troféus na grade principal:** aparece embaixo do nome do jogo, sem precisar abrir o detalhe
+
+## Novidades (segunda leva)
+
+- **Abas de perfil no histórico de análises:** dentro do detalhe do jogo, dá pra clicar entre os perfis de hardware pra ver o resultado de cada um lado a lado, sem precisar trocar o perfil ativo no topo
+- **Correção importante:** o campo "Rodando via" agora é realmente enviado pro Gemini na hora da análise (antes existia na tela mas não influenciava o resultado — por isso a IA às vezes recomendava contra a versão mais recente de um emulador mesmo quando você ia usar uma versão antiga mais leve). Inclua a versão do emulador nesse campo (ex: "PCSX2 v1.6.0") pra deixar a análise mais precisa
+- **Correção de bug:** o ID do RetroAchievements agora salva automaticamente ao sair do campo (antes só salvava se você clicasse no botão de atualizar — se fechasse o card sem clicar, perdia)
+- **Nome e ícone do jogo sempre sincronizados com o RetroAchievements**, quando há um ID vinculado
+- **"Última vez jogado"** exibido na seção de conquistas, quando disponível. Importante: o RetroAchievements não rastreia "horas jogadas" de forma confiável no PCSX2 (limitação do próprio serviço, não do app) — por isso não implementamos esse contador
+- **Franquias:** campo pra marcar a franquia/série de um jogo (ex: "God of War"), com filtro dedicado na tela principal pra maratonar uma série. Jogos com status "Zerado" ganham um selo verde de check na capa, fácil de ver de relance
+- **Ícone próprio ao adicionar à tela inicial do celular** (antes aparecia um ícone genérico de letra)
 
 ## Sobre custo
 
