@@ -168,23 +168,39 @@ async function handleRetroAchievements(request, env) {
 
   // "Última vez jogado" vem de um endpoint separado (histórico recente do
   // usuário). Nem todo jogo aparece aqui — só os jogados nos últimos períodos.
-  // OBS: o RetroAchievements NÃO rastreia "horas jogadas" de forma confiável
-  // pro PCSX2 (é uma limitação conhecida do próprio serviço, não do app).
+  // O "award" (Mastery/Beaten) também vem de um endpoint separado, que lista
+  // o progresso em TODOS os jogos do usuário — filtramos pelo gameId.
+  // As duas chamadas rodam em paralelo pra não somar latência.
+  // OBS: o RetroAchievements NÃO expõe "horas jogadas" via API pra nenhum
+  // console/emulador (é uma limitação conhecida do próprio serviço, não do
+  // app) — o que usamos como aproximação é o intervalo entre a primeira e a
+  // última conquista desbloqueada, que é só uma estimativa, não o tempo real.
   let lastPlayed = null;
-  try {
-    const recentUrl = `https://retroachievements.org/API/API_GetUserRecentlyPlayedGames.php?u=${encodeURIComponent(
-      username
-    )}&y=${encodeURIComponent(apiKey)}&c=100`;
-    const recentResponse = await fetch(recentUrl);
-    if (recentResponse.ok) {
-      const recentData = await recentResponse.json().catch(() => []);
-      const match = Array.isArray(recentData)
-        ? recentData.find((g) => String(g.GameID) === String(gameId))
-        : null;
-      if (match) lastPlayed = match.LastPlayed || null;
+  let highestAwardKind = null;
+  let highestAwardDate = null;
+
+  const recentUrl = `https://retroachievements.org/API/API_GetUserRecentlyPlayedGames.php?u=${encodeURIComponent(
+    username
+  )}&y=${encodeURIComponent(apiKey)}&c=100`;
+  const completionUrl = `https://retroachievements.org/API/API_GetUserCompletionProgress.php?u=${encodeURIComponent(
+    username
+  )}&y=${encodeURIComponent(apiKey)}&c=500`;
+
+  const [recentResult, completionResult] = await Promise.allSettled([
+    fetch(recentUrl).then((r) => (r.ok ? r.json() : null)),
+    fetch(completionUrl).then((r) => (r.ok ? r.json() : null)),
+  ]);
+
+  if (recentResult.status === "fulfilled" && Array.isArray(recentResult.value)) {
+    const match = recentResult.value.find((g) => String(g.GameID) === String(gameId));
+    if (match) lastPlayed = match.LastPlayed || null;
+  }
+  if (completionResult.status === "fulfilled" && completionResult.value?.Results) {
+    const match = completionResult.value.Results.find((g) => String(g.GameID) === String(gameId));
+    if (match) {
+      highestAwardKind = match.HighestAwardKind || null;
+      highestAwardDate = match.HighestAwardDate || null;
     }
-  } catch {
-    // não é crítico — se falhar, simplesmente não mostra "última vez jogado"
   }
 
   // Devolve só o que a UI precisa, num formato mais simples que o bruto da RA.
@@ -205,6 +221,12 @@ async function handleRetroAchievements(request, env) {
     return 0;
   });
 
+  // Estimativa (não é tempo real jogado): intervalo entre a primeira e a
+  // última conquista desbloqueada, ordenando as datas que existem.
+  const earnedDates = achievements.map((a) => a.dateEarned).filter(Boolean).sort();
+  const firstUnlockDate = earnedDates[0] || null;
+  const lastUnlockDate = earnedDates[earnedDates.length - 1] || null;
+
   return json({
     gameTitle: data.Title,
     consoleName: data.ConsoleName,
@@ -213,8 +235,115 @@ async function handleRetroAchievements(request, env) {
     numAchievements: data.NumAchievements || 0,
     numAwardedToUser: data.NumAwardedToUser || 0,
     userCompletion: data.UserCompletion || "0.00%",
+    developer: data.Developer || null,
+    publisher: data.Publisher || null,
+    genre: data.Genre || null,
+    released: data.Released || null,
     lastPlayed,
+    highestAwardKind,
+    highestAwardDate,
+    firstUnlockDate,
+    lastUnlockDate,
     achievements,
+  });
+}
+
+// Tempo médio (mediana entre todos os jogadores) pra zerar/platinar um jogo —
+// dado da comunidade, não é o tempo pessoal do usuário.
+async function handleRetroAchievementsProgression(request, env) {
+  const url = new URL(request.url);
+  const gameId = url.searchParams.get("gameId");
+  if (!gameId) return json({ error: "Falta o parâmetro gameId." }, 400);
+
+  const apiKey = env.RA_API_KEY;
+  if (!apiKey) return json({ error: "RA_API_KEY não configurada no servidor." }, 500);
+
+  const raUrl = `https://retroachievements.org/API/API_GetGameProgression.php?i=${encodeURIComponent(
+    gameId
+  )}&y=${encodeURIComponent(apiKey)}`;
+
+  let raResponse;
+  try {
+    raResponse = await fetch(raUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+  if (!raResponse.ok) {
+    return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
+  }
+  const data = await raResponse.json().catch(() => null);
+  if (!data) return json({ error: "Não foi possível interpretar a resposta do RetroAchievements." }, 502);
+
+  // Todos os campos de tempo vêm em segundos.
+  return json({
+    numDistinctPlayers: data.NumDistinctPlayers || 0,
+    medianTimeToBeatSeconds: data.MedianTimeToBeat ?? null,
+    medianTimeToBeatHardcoreSeconds: data.MedianTimeToBeatHardcore ?? null,
+    medianTimeToCompleteSeconds: data.MedianTimeToComplete ?? null,
+    medianTimeToMasterSeconds: data.MedianTimeToMaster ?? null,
+  });
+}
+
+// "Achievement of the Week" — o dado de evento semanal mais confiável que a
+// API do RetroAchievements expõe de forma estruturada.
+async function handleRetroAchievementsWeek(request, env) {
+  const apiKey = env.RA_API_KEY;
+  const username = env.RA_USERNAME;
+  if (!apiKey || !username) return json({ error: "RA não configurado no servidor." }, 500);
+
+  const raUrl = `https://retroachievements.org/API/API_GetAchievementOfTheWeek.php?y=${encodeURIComponent(
+    apiKey
+  )}`;
+
+  let raResponse;
+  try {
+    raResponse = await fetch(raUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+  if (!raResponse.ok) return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
+  const data = await raResponse.json().catch(() => null);
+  if (!data || !data.Achievement) return json({ error: "Sem evento da semana disponível." }, 404);
+
+  return json({
+    achievementTitle: data.Achievement.Title,
+    achievementDescription: data.Achievement.Description,
+    badgeUrl: data.Achievement.BadgeName
+      ? `https://i.retroachievements.org/Badge/${data.Achievement.BadgeName}.png`
+      : null,
+    gameTitle: data.Game?.Title || null,
+    consoleName: data.Console?.Title || null,
+    totalPlayers: data.TotalPlayers ?? null,
+    totalAwarded: data.UniqueTotalPlayers ?? null,
+  });
+}
+
+// Resumo simples da conta do RA (pontos) — usado como contexto no topo do
+// app. É uma conta única (o RA não distingue "qual PC" jogou), então isso
+// não é filtrado por perfil de hardware — ver observação na conversa.
+async function handleRetroAchievementsSummary(request, env) {
+  const apiKey = env.RA_API_KEY;
+  const username = env.RA_USERNAME;
+  if (!apiKey || !username) return json({ error: "RA não configurado no servidor." }, 500);
+
+  const raUrl = `https://retroachievements.org/API/API_GetUserPoints.php?u=${encodeURIComponent(
+    username
+  )}&y=${encodeURIComponent(apiKey)}`;
+
+  let raResponse;
+  try {
+    raResponse = await fetch(raUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+  if (!raResponse.ok) return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
+  const data = await raResponse.json().catch(() => null);
+  if (!data) return json({ error: "Não foi possível interpretar a resposta do RetroAchievements." }, 502);
+
+  return json({
+    username,
+    points: data.Points ?? 0,
+    softcorePoints: data.SoftcorePoints ?? 0,
   });
 }
 
@@ -314,6 +443,36 @@ export default {
       }
       if (request.method === "GET") {
         return handleRetroAchievements(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/retroachievements/progression") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleRetroAchievementsProgression(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/retroachievements/week") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleRetroAchievementsWeek(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/retroachievements/summary") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleRetroAchievementsSummary(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, CheckCircle2
+  Star, Users, Trophy, CheckCircle2, Award, Bell, Clock, Info
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -49,6 +49,23 @@ const STATUSES = [
 function statusOf(id) {
   return STATUSES.find((s) => s.id === id) || null;
 }
+
+// "Platinado" não é um status manual — é derivado direto do progresso de
+// conquistas do RetroAchievements (100% desbloqueado), então não entra na
+// lista STATUSES (que é sempre escolha manual do usuário).
+function isPlatinum(game) {
+  const p = game.raProgress;
+  return !!(p && p.numAchievements > 0 && p.numAwardedToUser >= p.numAchievements);
+}
+
+// Rótulos em português pros valores de AwardKind que a API do RA retorna
+// (mastered / completed / beaten-hardcore / beaten-softcore).
+const RA_AWARD_LABELS = {
+  mastered: "Mastery (100% hardcore)",
+  completed: "Completo (100%)",
+  "beaten-hardcore": "Zerado (hardcore)",
+  "beaten-softcore": "Zerado (softcore)",
+};
 
 function makeProfile(name, overrides = {}) {
   return {
@@ -107,6 +124,23 @@ function formatDate(iso) {
   }
 }
 
+function formatSeconds(sec) {
+  if (sec === null || sec === undefined) return null;
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  if (h === 0) return `${m}min`;
+  return m === 0 ? `${h}h` : `${h}h ${m}min`;
+}
+
+function formatDaySpan(fromIso, toIso) {
+  if (!fromIso || !toIso) return null;
+  const from = new Date(fromIso.replace(" ", "T"));
+  const to = new Date(toIso.replace(" ", "T"));
+  const days = Math.max(0, Math.round((to - from) / (1000 * 60 * 60 * 24)));
+  if (days === 0) return "menos de um dia";
+  return days === 1 ? "1 dia" : `${days} dias`;
+}
+
 function uid() {
   return (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -143,11 +177,66 @@ async function callAnalysis({ profile, game, notesText }) {
   }
 }
 
-function CoverThumb({ game, className }) {
+// Extrai uma cor média aproximada da capa (canvas 24x24, mais que suficiente
+// pra pegar a paleta geral) pra usar como cor da moldura personalizada.
+// Algumas CDNs (ex: capas antigas de certos hosts) não liberam CORS pra
+// leitura de pixel — nesse caso o canvas fica "tainted" e getImageData
+// lança erro; capturamos e caímos de volta pra uma cor fixa (ver CoverThumb).
+function useDominantColor(src) {
+  const [color, setColor] = useState(null);
+  useEffect(() => {
+    if (!src) {
+      setColor(null);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (cancelled) return;
+      try {
+        const size = 24;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, size, size);
+        const { data } = ctx.getImageData(0, 0, size, size);
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 128) continue;
+          r += data[i]; g += data[i + 1]; b += data[i + 2]; n += 1;
+        }
+        if (n === 0) { setColor(null); return; }
+        const boost = (c) => Math.max(0, Math.min(255, Math.round((c / n) * 1.15)));
+        setColor(`rgb(${boost(r)}, ${boost(g)}, ${boost(b)})`);
+      } catch {
+        setColor(null); // canvas tainted por CORS — usa cor fixa de fallback
+      }
+    };
+    img.onerror = () => { if (!cancelled) setColor(null); };
+    img.src = src;
+    return () => { cancelled = true; };
+  }, [src]);
+  return color;
+}
+
+function CoverThumb({ game, className, frame = false }) {
   const [failed, setFailed] = useState(false);
   const hasCover = game.coverUrl && !failed;
+  const platinum = frame && isPlatinum(game);
+  const completed = frame && game.status === "completed";
+  const shouldExtract = frame && hasCover && (platinum || completed);
+  const dominant = useDominantColor(shouldExtract ? game.coverUrl : null);
+  // Moldura "puxada pro jogo": usa a cor extraída da própria capa; se não
+  // der (CORS ou capa ausente), cai numa cor fixa por tipo de status.
+  const frameColor = platinum ? (dominant || "#f59e0b") : completed ? (dominant || "#10b981") : null;
+
   return (
-    <div className={`relative overflow-hidden bg-zinc-800 ${className}`}>
+    <div
+      className={`relative overflow-hidden bg-zinc-800 ${className}`}
+      style={frameColor ? { boxShadow: `inset 0 0 0 3px ${frameColor}, 0 0 16px -3px ${frameColor}` } : undefined}
+    >
       {hasCover ? (
         <img
           src={game.coverUrl}
@@ -159,6 +248,18 @@ function CoverThumb({ game, className }) {
         <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-zinc-800 to-zinc-900">
           <Gamepad2 className="w-8 h-8 text-zinc-600" />
           <span className="text-zinc-600 text-xs px-2 text-center line-clamp-2">{game.name}</span>
+        </div>
+      )}
+      {frame && (platinum || completed) && (
+        <div
+          className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-black/70 backdrop-blur flex items-center justify-center"
+          title={platinum ? "Platinado (100% das conquistas)" : "Zerado"}
+        >
+          {platinum ? (
+            <Award className="w-3.5 h-3.5 text-amber-400" />
+          ) : (
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          )}
         </div>
       )}
     </div>
@@ -193,6 +294,7 @@ export default function CompatHub() {
   const [platformFilter, setPlatformFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const [onlyPlatinum, setOnlyPlatinum] = useState(false);
   const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const [showAdd, setShowAdd] = useState(false);
@@ -201,6 +303,10 @@ export default function CompatHub() {
 
   const [analyzing, setAnalyzing] = useState({});
   const [errors, setErrors] = useState({});
+
+  const [weeklyEvent, setWeeklyEvent] = useState(null);
+  const [showWeeklyBanner, setShowWeeklyBanner] = useState(false);
+  const [raSummary, setRaSummary] = useState(null);
 
   const profile = profiles.find((p) => p.id === activeProfileId) || profiles[0];
 
@@ -230,6 +336,20 @@ export default function CompatHub() {
     })();
   }, []);
 
+  // Evento da semana (Achievement of the Week) e resumo da conta do RA —
+  // buscados uma vez ao abrir o app. Falha silenciosamente se o RA não
+  // estiver configurado no servidor (env RA_USERNAME/RA_API_KEY).
+  useEffect(() => {
+    fetch("/api/retroachievements/week")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => { if (body) { setWeeklyEvent(body); setShowWeeklyBanner(true); } })
+      .catch(() => {});
+    fetch("/api/retroachievements/summary")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => { if (body) setRaSummary(body); })
+      .catch(() => {});
+  }, []);
+
   async function persist(nextProfiles, nextActiveProfileId, nextGames) {
     try {
       await storage.set(
@@ -241,9 +361,22 @@ export default function CompatHub() {
     }
   }
 
-  function updateGames(nextGames) {
-    setGames(nextGames);
-    persist(profiles, activeProfileId, nextGames);
+  // CORREÇÃO DE BUG (regressão de capas sumindo): antes, updateGames recebia
+  // o array já pronto e updateGame fazia `games.map(...)` fechando sobre a
+  // variável `games` da render atual. Quando várias atualizações disparavam
+  // em sequência síncrona (ex: puxar progresso do RA, que chama capa + nome
+  // + ícone uma atrás da outra), o React agrupa (batching) essas chamadas de
+  // setState — só que cada uma calculava o próximo array a partir do MESMO
+  // `games` antigo, então só a última sobrevivia e as outras (ex: a capa)
+  // eram perdidas. A correção: aceitar uma função updater e usar a forma
+  // funcional do setState, que sempre recebe o estado mais recente de
+  // verdade, nunca uma cópia presa no closure.
+  function updateGames(updater) {
+    setGames((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      persist(profiles, activeProfileId, next);
+      return next;
+    });
   }
 
   function updateProfiles(nextProfiles, nextActiveProfileId) {
@@ -274,7 +407,7 @@ export default function CompatHub() {
       runningVia: "",
       createdAt: new Date().toISOString(),
     };
-    updateGames([newGame, ...games]);
+    updateGames((prev) => [newGame, ...prev]);
     setShowAdd(false);
     setActiveGameId(newGame.id);
   }
@@ -298,19 +431,18 @@ export default function CompatHub() {
       ? `Remover "${game.name}"? Isso apaga também o histórico de problemas e as análises salvas. Essa ação não pode ser desfeita.`
       : `Remover "${game?.name}"?`;
     if (!window.confirm(message)) return;
-    updateGames(games.filter((g) => g.id !== id));
+    updateGames((prev) => prev.filter((g) => g.id !== id));
     if (activeGameId === id) setActiveGameId(null);
   }
 
   function updateGame(id, patch) {
-    updateGames(games.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+    updateGames((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g)));
   }
 
   function addNote(id, text) {
     if (!text.trim()) return;
-    const game = games.find((g) => g.id === id);
-    const notes = [...(game.notes || []), { date: new Date().toISOString(), text: text.trim() }];
-    updateGame(id, { notes });
+    const entry = { date: new Date().toISOString(), text: text.trim() };
+    updateGames((prev) => prev.map((g) => (g.id === id ? { ...g, notes: [...(g.notes || []), entry] } : g)));
   }
 
   async function analyze(id) {
@@ -343,8 +475,9 @@ export default function CompatHub() {
     const matchesPlatform = platformFilter === "all" || g.platform === platformFilter;
     const matchesStatus = statusFilter === "all" || g.status === statusFilter;
     const matchesFavorite = !onlyFavorites || g.favorite;
+    const matchesPlatinum = !onlyPlatinum || isPlatinum(g);
     const matchesFranchise = franchiseFilter === "all" || g.franchise === franchiseFilter;
-    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesFranchise;
+    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
@@ -379,6 +512,34 @@ export default function CompatHub() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      {/* notificação: evento da semana do RetroAchievements (Achievement of
+          the Week) — topo cheio no celular, canto superior direito no web */}
+      {showWeeklyBanner && weeklyEvent && (
+        <div className="fixed top-3 inset-x-3 sm:inset-x-auto sm:right-4 sm:left-auto sm:w-80 z-40">
+          <div className="flex items-start gap-3 bg-zinc-900 border border-indigo-700 rounded-xl p-3 shadow-lg shadow-black/40">
+            {weeklyEvent.badgeUrl && (
+              <img src={weeklyEvent.badgeUrl} alt="" className="w-10 h-10 rounded shrink-0" />
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="flex items-center gap-1.5 text-xs text-indigo-300 font-medium mb-0.5">
+                <Bell className="w-3.5 h-3.5" /> Conquista da semana
+              </p>
+              <p className="text-sm font-medium truncate">{weeklyEvent.achievementTitle}</p>
+              {weeklyEvent.gameTitle && (
+                <p className="text-xs text-zinc-500 truncate">{weeklyEvent.gameTitle}</p>
+              )}
+            </div>
+            <button
+              onClick={() => setShowWeeklyBanner(false)}
+              className="text-zinc-500 hover:text-zinc-200 transition-colors shrink-0"
+              aria-label="Fechar notificação"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* header */}
       <div className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
         <div className="max-w-6xl mx-auto px-5 py-4 flex flex-wrap items-center gap-4">
@@ -406,6 +567,16 @@ export default function CompatHub() {
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.gpu}</span>
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.ram}</span>
           </div>
+
+          {raSummary && (
+            <span
+              className="hidden sm:flex items-center gap-1.5 text-xs text-amber-300 bg-amber-950/30 border border-amber-800 rounded-md px-2.5 py-1.5"
+              title="Pontos da sua conta no RetroAchievements (conta única — não é separado por PC/perfil)"
+            >
+              <Trophy className="w-3.5 h-3.5" />
+              {raSummary.points} pts
+            </span>
+          )}
 
           <button
             onClick={() => setShowProfile(true)}
@@ -516,6 +687,18 @@ export default function CompatHub() {
         </button>
 
         <button
+          onClick={() => setOnlyPlatinum(!onlyPlatinum)}
+          className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm border transition-colors ${
+            onlyPlatinum
+              ? "bg-amber-900/40 border-amber-700 text-amber-300"
+              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Award className="w-4 h-4" />
+          Platinados
+        </button>
+
+        <button
           onClick={() => setShowAdd(true)}
           className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2"
         >
@@ -562,18 +745,10 @@ export default function CompatHub() {
                   </button>
                   <button onClick={() => setActiveGameId(game.id)} className="text-left w-full">
                     <div className="relative">
-                      <CoverThumb game={game} className="aspect-video group-hover:opacity-90 transition-opacity" />
+                      <CoverThumb game={game} frame className="aspect-video group-hover:opacity-90 transition-opacity" />
                       <div className="absolute top-2 right-2">
                         <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
                       </div>
-                      {game.status === "completed" && (
-                        <div
-                          className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-emerald-600 flex items-center justify-center"
-                          title="Zerado"
-                        >
-                          <CheckCircle2 className="w-4 h-4 text-white" />
-                        </div>
-                      )}
                     </div>
                     <div className="p-3">
                       <p className="text-sm font-medium line-clamp-1">{game.name}</p>
@@ -615,6 +790,7 @@ export default function CompatHub() {
         <ProfileModal
           profiles={profiles}
           activeProfileId={activeProfileId}
+          games={games}
           onClose={() => setShowProfile(false)}
           onSave={(nextProfiles, nextActiveId) => { updateProfiles(nextProfiles, nextActiveId); setShowProfile(false); }}
         />
@@ -638,10 +814,8 @@ export default function CompatHub() {
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
           onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
           onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
-          onUpdateCoverFromRA={(coverUrl) => updateGame(activeGame.id, { coverUrl })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
-          onCacheRaProgress={(raProgress) => updateGame(activeGame.id, { raProgress })}
-          onUpdateNameAndIconFromRA={(name, raIconUrl) => updateGame(activeGame.id, { name, raIconUrl })}
+          onApplyRaData={(patch) => updateGame(activeGame.id, patch)}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -759,10 +933,20 @@ function AddGameModal({ games, onClose, onAdd }) {
   );
 }
 
-function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
+function ProfileModal({ profiles, activeProfileId, games = [], onClose, onSave }) {
   const [list, setList] = useState(profiles);
   const [editingId, setEditingId] = useState(activeProfileId);
   const editing = list.find((p) => p.id === editingId) || list[0];
+
+  // Contexto RetroAchievements x perfil de hardware: o RA em si é uma conta
+  // única (não sabe "qual PC" jogou), então não dá pra puxar dados do RA
+  // filtrados por perfil de verdade. O que dá pra mostrar com honestidade é
+  // quantos jogos deste perfil têm RA vinculado e já foram analisados
+  // rodando neste hardware — útil pra saber quais jogos de emulador (que é
+  // onde o RA funciona) estão ativos num perfil como o "PC Retrô".
+  const raLinkedInProfile = games.filter(
+    (g) => g.raGameId && (g.analyses || []).some((a) => a.profileId === editing.id)
+  ).length;
 
   function updateField(field, value) {
     setList(list.map((p) => (p.id === editing.id ? { ...p, [field]: value } : p)));
@@ -828,6 +1012,13 @@ function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
           />
         </div>
 
+        {raLinkedInProfile > 0 && (
+          <p className="flex items-center gap-1.5 text-xs text-amber-300 bg-amber-950/30 border border-amber-800 rounded-lg px-3 py-2 mb-4">
+            <Trophy className="w-3.5 h-3.5 shrink-0" />
+            {raLinkedInProfile} jogo(s) com RetroAchievements vinculado analisado(s) neste perfil
+          </p>
+        )}
+
         {["cpu", "gpu", "ram", "os"].map((field) => (
           <div key={field} className="mb-4">
             <label className="text-xs text-zinc-400 mb-1 block uppercase">{field}</label>
@@ -872,12 +1063,13 @@ function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
 }
 
 function RetroAchievementsSection({
-  game, onUpdateRaGameId, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress, onUpdateNameAndIconFromRA,
+  game, onUpdateRaGameId, onSaveTranslations, onApplyRaData,
 }) {
   const [gameIdInput, setGameIdInput] = useState(game.raGameId || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
+  const [progression, setProgression] = useState(null);
   const [showAll, setShowAll] = useState(false);
   const [translations, setTranslations] = useState(game.raTranslations || {});
   const [translating, setTranslating] = useState(false);
@@ -892,13 +1084,32 @@ function RetroAchievementsSection({
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
       setData(body);
-      onCacheRaProgress({ numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements });
+
+      // IMPORTANTE: um único patch, uma única chamada de updateGame — é isso
+      // que evita a regressão de capa/nome/progresso se sobrescreverem entre
+      // si (ver comentário em updateGames no componente principal).
+      const patch = {
+        raProgress: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements },
+        name: body.gameTitle,
+        raIconUrl: body.imageIcon,
+        raMeta: {
+          developer: body.developer,
+          publisher: body.publisher,
+          genre: body.genre,
+          released: body.released,
+        },
+        raAward: { kind: body.highestAwardKind, date: body.highestAwardDate },
+        raPlaySpan: { first: body.firstUnlockDate, last: body.lastUnlockDate },
+      };
       // Se o jogo ainda não tem capa manual, usa a boxart do RetroAchievements.
-      if (!game.coverUrl && body.boxArtUrl) {
-        onUpdateCoverFromRA(body.boxArtUrl);
-      }
-      // Nome e ícone do jogo sempre alinhados com o título oficial do RA.
-      onUpdateNameAndIconFromRA(body.gameTitle, body.imageIcon);
+      if (!game.coverUrl && body.boxArtUrl) patch.coverUrl = body.boxArtUrl;
+      onApplyRaData(patch);
+
+      // Tempo médio da comunidade (não bloqueia a UI principal se falhar).
+      fetch(`/api/retroachievements/progression?gameId=${encodeURIComponent(id)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => setProgression(p))
+        .catch(() => setProgression(null));
     } catch (e) {
       setError(e.message);
       setData(null);
@@ -1015,13 +1226,53 @@ function RetroAchievementsSection({
             <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
           </div>
 
-          {data.lastPlayed ? (
-            <p className="text-xs text-zinc-500 mb-3">Última vez jogado: {formatDate(data.lastPlayed)}</p>
-          ) : (
-            <p className="text-xs text-zinc-600 mb-3">
-              Sem registro de "última vez jogado" ainda (o RetroAchievements não rastreia horas jogadas de forma
-              confiável no PCSX2 — só a data mais recente, quando disponível).
+          {(data.developer || data.publisher || data.genre || data.released) && (
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500 mb-3">
+              {data.developer && <span>Dev: <span className="text-zinc-400">{data.developer}</span></span>}
+              {data.publisher && <span>Publisher: <span className="text-zinc-400">{data.publisher}</span></span>}
+              {data.genre && <span>Gênero: <span className="text-zinc-400">{data.genre}</span></span>}
+              {data.released && <span>Lançamento: <span className="text-zinc-400">{data.released}</span></span>}
+            </div>
+          )}
+
+          {data.highestAwardKind && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-300 bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 mb-3">
+              <Award className="w-3.5 h-3.5 shrink-0" />
+              {RA_AWARD_LABELS[data.highestAwardKind] || data.highestAwardKind}
+              {data.highestAwardDate && <span className="text-amber-400/70 ml-1">— {formatDate(data.highestAwardDate)}</span>}
+            </div>
+          )}
+
+          {data.lastPlayed && (
+            <p className="text-xs text-zinc-500 mb-1">Última vez jogado: {formatDate(data.lastPlayed)}</p>
+          )}
+
+          {data.firstUnlockDate && data.lastUnlockDate ? (
+            <p className="flex items-start gap-1.5 text-xs text-zinc-500 mb-1">
+              <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              Tempo aproximado (1ª à última conquista): ~{formatDaySpan(data.firstUnlockDate, data.lastUnlockDate)}
             </p>
+          ) : (
+            <p className="text-xs text-zinc-600 mb-1">
+              Sem conquistas suficientes ainda pra estimar um tempo aproximado.
+            </p>
+          )}
+          <p className="flex items-start gap-1 text-xs text-zinc-700 mb-3">
+            <Info className="w-3 h-3 shrink-0 mt-0.5" />
+            O RetroAchievements não expõe horas jogadas reais via API — essa é só uma estimativa baseada no
+            intervalo entre conquistas, melhor que nada mas não é o tempo exato.
+          </p>
+
+          {progression && (progression.medianTimeToCompleteSeconds || progression.medianTimeToMasterSeconds) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500 mb-3 bg-zinc-900/60 rounded-lg px-3 py-2">
+              <span className="text-zinc-400">Mediana da comunidade:</span>
+              {progression.medianTimeToCompleteSeconds && (
+                <span>zerar: <span className="text-zinc-300">{formatSeconds(progression.medianTimeToCompleteSeconds)}</span></span>
+              )}
+              {progression.medianTimeToMasterSeconds && (
+                <span>platinar: <span className="text-zinc-300">{formatSeconds(progression.medianTimeToMasterSeconds)}</span></span>
+              )}
+            </div>
           )}
 
           <button
@@ -1077,8 +1328,8 @@ function RetroAchievementsSection({
 function GameDetailModal({
   game, analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus,
-  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress,
-  onUpdateNameAndIconFromRA, onRemove,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onSaveTranslations, onApplyRaData,
+  onRemove,
 }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
@@ -1098,12 +1349,22 @@ function GameDetailModal({
   return (
     <ModalShell onClose={onClose} maxW="max-w-2xl">
       <div>
-        <CoverThumb game={game} className="w-full aspect-video" />
+        <CoverThumb game={game} frame className="w-full aspect-video" />
         <div className="p-6">
           <div className="flex items-start justify-between gap-3 mb-1">
             <div className="flex items-center gap-2 min-w-0">
               {game.raIconUrl && (
-                <img src={game.raIconUrl} alt="" className="w-7 h-7 rounded shrink-0" />
+                <img
+                  src={game.raIconUrl}
+                  alt=""
+                  className={`w-7 h-7 rounded shrink-0 ${
+                    isPlatinum(game)
+                      ? "ring-2 ring-amber-400"
+                      : game.status === "completed"
+                      ? "ring-2 ring-emerald-500"
+                      : ""
+                  }`}
+                />
               )}
               <h2 className="text-lg font-semibold truncate">{game.name}</h2>
             </div>
@@ -1141,10 +1402,8 @@ function GameDetailModal({
           <RetroAchievementsSection
             game={game}
             onUpdateRaGameId={onUpdateRaGameId}
-            onUpdateCoverFromRA={onUpdateCoverFromRA}
             onSaveTranslations={onSaveTranslations}
-            onCacheRaProgress={onCacheRaProgress}
-            onUpdateNameAndIconFromRA={onUpdateNameAndIconFromRA}
+            onApplyRaData={onApplyRaData}
           />
 
           {/* rodando via: emulador ou executável */}
