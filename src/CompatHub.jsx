@@ -24,6 +24,21 @@ const TIER_META = {
   1: { label: "Não roda", dot: "bg-red-500", text: "text-red-300", border: "border-red-600" },
 };
 
+const RUNNING_VIA_SUGGESTIONS = [
+  "Executável nativo",
+  "Steam",
+  "Epic Games",
+  "GOG Galaxy",
+  "PCSX2 (PS2)",
+  "RPCS3 (PS3)",
+  "Dolphin (GameCube/Wii)",
+  "PPSSPP (PSP)",
+  "DuckStation (PS1)",
+  "Xenia (Xbox 360)",
+  "Cemu (Wii U)",
+  "Yuzu/Ryujinx (Switch)",
+];
+
 const STATUSES = [
   { id: "backlog", label: "Quero jogar", badge: "bg-zinc-800 text-zinc-300 border border-zinc-600" },
   { id: "playing", label: "Jogando", badge: "bg-sky-900 text-sky-300 border border-sky-700" },
@@ -303,7 +318,12 @@ export default function CompatHub() {
     try {
       const notesText = (game.notes || []).map((n) => `- ${n.text}`).join("\n");
       const result = await callAnalysis({ profile, game, notesText });
-      const entry = { ...result, date: new Date().toISOString() };
+      const entry = {
+        ...result,
+        date: new Date().toISOString(),
+        profileId: profile.id,
+        profileName: profile.name,
+      };
       const analyses = [entry, ...(game.analyses || [])];
       updateGame(id, { analyses });
     } catch (e) {
@@ -323,11 +343,13 @@ export default function CompatHub() {
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
 
-  // Dashboard: contadores simples calculados a partir dos dados que já existem.
+  // Dashboard: contadores simples, calculados só com base no perfil de hardware
+  // ativo no momento (uma análise feita no PC Retrô não deveria contar como
+  // "excelente" quando você está olhando o perfil do PC Principal).
   const stats = games.reduce(
     (acc, g) => {
       acc.total += 1;
-      const latest = (g.analyses || [])[0];
+      const latest = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
       if (latest) {
         acc.analyzed += 1;
         if (latest.tier === 5) acc.excellent += 1;
@@ -505,7 +527,7 @@ export default function CompatHub() {
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {filteredGames.map((game) => {
-              const latest = (game.analyses || [])[0];
+              const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
               const gameStatus = statusOf(game.status);
               return (
                 <div
@@ -528,6 +550,17 @@ export default function CompatHub() {
                     </div>
                     <div className="p-3">
                       <p className="text-sm font-medium line-clamp-1">{game.name}</p>
+                      {(game.raProgress || game.runningVia) && (
+                        <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500">
+                          {game.raProgress && (
+                            <span className="flex items-center gap-1">
+                              <Trophy className="w-3 h-3 text-amber-500" />
+                              {game.raProgress.numAwardedToUser}/{game.raProgress.numAchievements}
+                            </span>
+                          )}
+                          {game.runningVia && <span className="truncate">{game.runningVia}</span>}
+                        </div>
+                      )}
                       <div className="flex items-center justify-between mt-2 gap-2">
                         <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
                           {platformOf(game.platform).label}
@@ -566,6 +599,8 @@ export default function CompatHub() {
           game={activeGame}
           analyzing={!!analyzing[activeGame.id]}
           error={errors[activeGame.id]}
+          activeProfileId={activeProfileId}
+          activeProfileName={profile.name}
           onClose={() => setActiveGameId(null)}
           onAnalyze={() => analyze(activeGame.id)}
           onAddNote={(text) => addNote(activeGame.id, text)}
@@ -573,6 +608,10 @@ export default function CompatHub() {
           onToggleFavorite={() => toggleFavorite(activeGame.id)}
           onSetStatus={(status) => setGameStatus(activeGame.id, status)}
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
+          onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
+          onUpdateCoverFromRA={(coverUrl) => updateGame(activeGame.id, { coverUrl })}
+          onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
+          onCacheRaProgress={(raProgress) => updateGame(activeGame.id, { raProgress })}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -802,12 +841,15 @@ function ProfileModal({ profiles, activeProfileId, onClose, onSave }) {
   );
 }
 
-function RetroAchievementsSection({ game, onUpdateRaGameId }) {
+function RetroAchievementsSection({ game, onUpdateRaGameId, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress }) {
   const [gameIdInput, setGameIdInput] = useState(game.raGameId || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [showAll, setShowAll] = useState(false);
+  const [translations, setTranslations] = useState(game.raTranslations || {});
+  const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState("");
 
   async function fetchProgress(id) {
     if (!id) return;
@@ -818,6 +860,11 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
       setData(body);
+      onCacheRaProgress({ numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements });
+      // Se o jogo ainda não tem capa manual, usa a boxart do RetroAchievements.
+      if (!game.coverUrl && body.boxArtUrl) {
+        onUpdateCoverFromRA(body.boxArtUrl);
+      }
     } catch (e) {
       setError(e.message);
       setData(null);
@@ -829,6 +876,7 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
   // Se o jogo já tem um ID salvo, busca o progresso automaticamente ao abrir.
   useEffect(() => {
     if (game.raGameId) fetchProgress(game.raGameId);
+    setTranslations(game.raTranslations || {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id]);
 
@@ -838,8 +886,40 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
     if (trimmed) fetchProgress(trimmed);
   }
 
+  async function handleTranslate() {
+    if (!data || !data.achievements.length) return;
+    setTranslating(true);
+    setTranslateError("");
+    try {
+      // Só traduz o que ainda não foi traduzido antes (economiza cota do Gemini).
+      const pending = data.achievements.filter((a) => !translations[a.id]);
+      if (pending.length === 0) {
+        setTranslating(false);
+        return;
+      }
+      const res = await fetch("/api/translate-achievements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ achievements: pending.map((a) => ({ id: a.id, title: a.title, description: a.description })) }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      const merged = { ...translations };
+      for (const t of body.translations || []) {
+        merged[t.id] = { title: t.title, description: t.description };
+      }
+      setTranslations(merged);
+      onSaveTranslations(merged);
+    } catch (e) {
+      setTranslateError(e.message);
+    } finally {
+      setTranslating(false);
+    }
+  }
+
   const visibleAchievements = data ? (showAll ? data.achievements : data.achievements.slice(0, 6)) : [];
   const pct = data && data.numAchievements ? Math.round((data.numAwardedToUser / data.numAchievements) * 100) : 0;
+  const hasTranslations = Object.keys(translations).length > 0;
 
   return (
     <div className="mb-5">
@@ -867,7 +947,7 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
       {!game.raGameId && !gameIdInput.trim() && (
         <p className="text-xs text-zinc-600 mb-2">
           Cole o ID do jogo no RetroAchievements (o número que aparece na URL do jogo no site) pra acompanhar suas
-          conquistas aqui.
+          conquistas e puxar a capa automaticamente.
         </p>
       )}
 
@@ -889,24 +969,41 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
           <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-3">
             <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
           </div>
+
+          <button
+            onClick={handleTranslate}
+            disabled={translating}
+            className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50 transition-colors mb-2"
+          >
+            {translating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            {hasTranslations ? "Atualizar tradução" : "Traduzir para português"}
+          </button>
+          {translateError && <p className="text-xs text-red-400 mb-2">{translateError}</p>}
+
           <ul className="space-y-1.5">
-            {visibleAchievements.map((a) => (
-              <li
-                key={a.id}
-                className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg ${
-                  a.earned ? "bg-zinc-900" : "bg-zinc-900/40 opacity-50"
-                }`}
-              >
-                <img
-                  src={`https://i.retroachievements.org/Badge/${a.badgeName}${a.earned ? "" : "_lock"}.png`}
-                  alt=""
-                  className="w-6 h-6 rounded shrink-0"
-                  onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
-                />
-                <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
-                {a.earned && <span className="ml-auto text-amber-400 shrink-0">✓</span>}
-              </li>
-            ))}
+            {visibleAchievements.map((a) => {
+              const t = translations[a.id];
+              return (
+                <li
+                  key={a.id}
+                  className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg ${
+                    a.earned ? "bg-zinc-900" : "bg-zinc-900/40 opacity-50"
+                  }`}
+                >
+                  <img
+                    src={`https://i.retroachievements.org/Badge/${a.badgeName}${a.earned ? "" : "_lock"}.png`}
+                    alt=""
+                    className="w-6 h-6 rounded shrink-0"
+                    onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                  />
+                  <div className="min-w-0">
+                    <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{t?.title || a.title}</p>
+                    {t && <p className="truncate text-zinc-600">{a.title}</p>}
+                  </div>
+                  {a.earned && <span className="ml-auto text-amber-400 shrink-0">✓</span>}
+                </li>
+              );
+            })}
           </ul>
           {data.achievements.length > 6 && (
             <button
@@ -923,12 +1020,31 @@ function RetroAchievementsSection({ game, onUpdateRaGameId }) {
   );
 }
 
-function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onUpdateRaGameId, onRemove }) {
+function GameDetailModal({
+  game, analyzing, error, activeProfileId, activeProfileName,
+  onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateCoverFromRA, onSaveTranslations, onCacheRaProgress, onRemove,
+}) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
+  const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
   const [showHistory, setShowHistory] = useState(false);
-  const latest = (game.analyses || [])[0];
-  const older = (game.analyses || []).slice(1);
+  const allAnalyses = game.analyses || [];
+
+  // Analiese feitas antes de existir múltiplos perfis não têm profileId — nesse
+  // caso, tratamos como pertencentes a qualquer perfil (não some do histórico).
+  const analysesForActiveProfile = allAnalyses.filter((a) => !a.profileId || a.profileId === activeProfileId);
+  const latest = analysesForActiveProfile[0];
+  const older = analysesForActiveProfile.slice(1);
+
+  // Resumo rápido: última análise feita em CADA outro perfil (não o ativo).
+  const otherProfilesMap = new Map();
+  for (const a of allAnalyses) {
+    if (a.profileId && a.profileId !== activeProfileId && !otherProfilesMap.has(a.profileId)) {
+      otherProfilesMap.set(a.profileId, a);
+    }
+  }
+  const otherProfilesLatest = Array.from(otherProfilesMap.values());
 
   return (
     <ModalShell onClose={onClose} maxW="max-w-2xl">
@@ -968,7 +1084,33 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
           </div>
 
           {/* conquistas via RetroAchievements */}
-          <RetroAchievementsSection game={game} onUpdateRaGameId={onUpdateRaGameId} />
+          <RetroAchievementsSection
+            game={game}
+            onUpdateRaGameId={onUpdateRaGameId}
+            onUpdateCoverFromRA={onUpdateCoverFromRA}
+            onSaveTranslations={onSaveTranslations}
+            onCacheRaProgress={onCacheRaProgress}
+          />
+
+          {/* rodando via: emulador ou executável */}
+          <div className="mb-5">
+            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+              <Gamepad2 className="w-3.5 h-3.5" /> Rodando via
+            </div>
+            <input
+              list="running-via-options"
+              value={runningViaText}
+              onChange={(e) => setRunningViaText(e.target.value)}
+              onBlur={() => onUpdateRunningVia(runningViaText)}
+              placeholder="ex: PCSX2, RPCS3, Executável nativo, Steam..."
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+            />
+            <datalist id="running-via-options">
+              {RUNNING_VIA_SUGGESTIONS.map((opt) => (
+                <option key={opt} value={opt} />
+              ))}
+            </datalist>
+          </div>
 
           {/* objetivos */}
           <div className="mb-5">
@@ -1039,7 +1181,10 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
             <div className={`rounded-xl border ${TIER_META[latest.tier]?.border || "border-zinc-700"} bg-zinc-950 p-4 mb-3`}>
               <div className="flex items-center justify-between mb-2">
                 <TierBadge tier={latest.tier} tierLabel={latest.tierLabel} size="lg" />
-                <span className="text-xs text-zinc-600">{formatDate(latest.date)}</span>
+                <div className="text-right">
+                  <span className="text-xs text-zinc-600 block">{formatDate(latest.date)}</span>
+                  <span className="text-xs text-zinc-500">perfil: {latest.profileName || activeProfileName}</span>
+                </div>
               </div>
               <p className="text-sm font-medium mb-1.5">{latest.veredito}</p>
               <p className="text-sm text-zinc-400 mb-3">{latest.motivo}</p>
@@ -1061,6 +1206,19 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
             </div>
           )}
 
+          {/* resumo rápido de como esse jogo se sai em outros perfis já testados */}
+          {otherProfilesLatest.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 mb-4">
+              <span className="text-xs text-zinc-600">também testado em:</span>
+              {otherProfilesLatest.map((a) => (
+                <span key={a.profileId} className="flex items-center gap-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-full px-2 py-1">
+                  <TierBadge tier={a.tier} tierLabel={a.tierLabel} />
+                  <span className="text-zinc-400">{a.profileName}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           {older.length > 0 && (
             <div className="mb-4">
               <button
@@ -1068,7 +1226,7 @@ function GameDetailModal({ game, analyzing, error, onClose, onAnalyze, onAddNote
                 className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
               >
                 {showHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                Ver {older.length} análise(s) anterior(es)
+                Ver {older.length} análise(s) anterior(es) neste perfil
               </button>
               {showHistory && (
                 <div className="mt-2 space-y-2">

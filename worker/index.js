@@ -185,12 +185,89 @@ async function handleRetroAchievements(request, env) {
   return json({
     gameTitle: data.Title,
     consoleName: data.ConsoleName,
-    imageIcon: data.ImageIcon,
+    imageIcon: data.ImageIcon ? `https://retroachievements.org${data.ImageIcon}` : null,
+    boxArtUrl: data.ImageBoxArt ? `https://retroachievements.org${data.ImageBoxArt}` : null,
     numAchievements: data.NumAchievements || 0,
     numAwardedToUser: data.NumAwardedToUser || 0,
     userCompletion: data.UserCompletion || "0.00%",
     achievements,
   });
+}
+
+async function handleTranslateAchievements(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "Corpo da requisição inválido." }, 400);
+  }
+
+  const { achievements } = payload || {};
+  if (!Array.isArray(achievements) || achievements.length === 0) {
+    return json({ error: "Nenhuma conquista pra traduzir." }, 400);
+  }
+
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return json({ error: "GEMINI_API_KEY não configurada no servidor." }, 500);
+  }
+  const model = env.GEMINI_MODEL || "gemini-3-flash";
+
+  // Manda id + título + descrição em lote, pede de volta um JSON na mesma
+  // ordem/ids — assim traduz tudo numa chamada só em vez de uma por conquista.
+  const listForPrompt = achievements.map((a) => ({ id: a.id, title: a.title, description: a.description }));
+
+  const systemInstruction = `Você traduz conquistas de jogos (achievements) do inglês pro português do Brasil.
+Mantenha nomes próprios, referências e trocadilhos do jogo o quanto for possível, adaptando pra soar natural em português.
+Responda SOMENTE com um JSON válido (array), sem texto antes ou depois, sem markdown, no formato exato:
+[{ "id": <mesmo id recebido>, "title": "título traduzido", "description": "descrição traduzida" }]`;
+
+  const userPrompt = JSON.stringify(listForPrompt);
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        generationConfig: { temperature: 0.2 },
+      }),
+    });
+  } catch (e) {
+    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    return json({ error: `Gemini retornou erro ${response.status}: ${errText.slice(0, 300)}` }, 502);
+  }
+
+  const data = await response.json();
+  const candidate = (data.candidates || [])[0];
+  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  const cleaned = text.replace(/```json|```/g, "").trim();
+
+  let translations;
+  try {
+    translations = JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        translations = JSON.parse(match[0]);
+      } catch {
+        return json({ error: "Não consegui interpretar a tradução retornada." }, 502);
+      }
+    } else {
+      return json({ error: "Não consegui interpretar a tradução retornada." }, 502);
+    }
+  }
+
+  return json({ translations });
 }
 
 export default {
@@ -213,6 +290,16 @@ export default {
       }
       if (request.method === "GET") {
         return handleRetroAchievements(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/translate-achievements") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "POST") {
+        return handleTranslateAchievements(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
