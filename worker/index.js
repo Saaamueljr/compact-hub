@@ -158,6 +158,7 @@ Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, s
   "publisher": "publicadora ou null se não souber",
   "genre": "gênero curto ou null",
   "released": "ano de lançamento (ou data) ou null",
+  "franchise": "nome curto e canônico da franquia/série a que o jogo pertence (ex: 'God of War', 'Mario Kart', 'Final Fantasy') ou null se for um jogo standalone sem franquia",
   "lore": "2 a 4 frases em português, cobrindo contexto/lore do jogo e 1-2 feitos ou curiosidades marcantes dele na indústria (recepção histórica, inovação técnica, influência em outros jogos, polêmicas, recordes etc). Direto ao ponto, sem enrolação."
 }`;
 
@@ -380,6 +381,10 @@ async function handleRetroAchievementsProfile(request, env) {
     points: data.TotalPoints ?? 0,
     truePoints: data.TotalTruePoints ?? 0,
     memberSince: data.MemberSince || null,
+    // esses dois campos variam de disponibilidade dependendo da conta/API —
+    // por isso são tratados como opcionais no front.
+    recentGameTitle: data.RecentlyPlayedCount > 0 ? data.RecentlyPlayed?.[0]?.Title || null : null,
+    totalGamesPlayed: data.TotalGamesPlayed ?? data.RecentlyPlayedCount ?? null,
   });
 }
 

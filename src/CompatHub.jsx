@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, CheckCircle2, Award, Bell, Clock, Info
+  Star, Users, Trophy, Award, Bell, Clock, Info
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -50,12 +50,17 @@ function statusOf(id) {
   return STATUSES.find((s) => s.id === id) || null;
 }
 
-// "Platinado" não é um status manual — é derivado direto do progresso de
-// conquistas do RetroAchievements (100% desbloqueado), então não entra na
-// lista STATUSES (que é sempre escolha manual do usuário).
+// "Platinado" tem duas origens possíveis:
+// - jogos "retro" (RA vinculado): automático, 100% das conquistas da RA.
+// - qualquer outra plataforma (Steam/GOG/Epic/Amazon/Outro): o CompactHub
+//   não tem como ler conquistas dessas lojas, então é uma marcação manual
+//   do usuário (game.manualPlatinum) — ver botão "Platinado" no detalhe.
 function isPlatinum(game) {
-  const p = game.raProgress;
-  return !!(p && p.numAchievements > 0 && p.numAwardedToUser >= p.numAchievements);
+  if (game.platform === "retro") {
+    const p = game.raProgress;
+    return !!(p && p.numAchievements > 0 && p.numAwardedToUser >= p.numAchievements);
+  }
+  return !!game.manualPlatinum;
 }
 
 // Rótulos em português pros valores de AwardKind que a API do RA retorna
@@ -234,21 +239,20 @@ function FrameOverlay({ variant, seed }) {
   const theme = FRAME_THEMES[variant];
   const stars = useFrameStars(`${variant}-${seed}`);
   if (!theme) return null;
+  const T = 4; // espessura da moldura em px
+  const stripStyle = {
+    background: theme.border,
+    boxShadow: `0 0 10px 1px ${theme.glow}`,
+  };
   return (
-    <div className="absolute inset-0 rounded-[inherit] pointer-events-none" aria-hidden="true">
-      {/* moldura: gradiente aplicado só na "casca" via mask (border real, não
-          cobre a imagem) */}
-      <div
-        className="absolute inset-0 rounded-[inherit]"
-        style={{
-          padding: 3,
-          background: theme.border,
-          WebkitMask: "linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0)",
-          WebkitMaskComposite: "xor",
-          maskComposite: "exclude",
-          boxShadow: `0 0 16px 1px ${theme.glow}, inset 0 0 10px 0 ${theme.glow}`,
-        }}
-      />
+    <div className="absolute inset-0 pointer-events-none z-10" aria-hidden="true">
+      {/* moldura desenhada como 4 tarjas sólidas (não depende de mask/
+          border-image, que não renderizavam de forma confiável em cima da
+          capa) — sempre visível, em qualquer navegador */}
+      <div className="absolute top-0 left-0 right-0" style={{ height: T, ...stripStyle }} />
+      <div className="absolute bottom-0 left-0 right-0" style={{ height: T, ...stripStyle }} />
+      <div className="absolute top-0 bottom-0 left-0" style={{ width: T, ...stripStyle }} />
+      <div className="absolute top-0 bottom-0 right-0" style={{ width: T, ...stripStyle }} />
       {stars.map((star, i) => (
         <span
           key={i}
@@ -299,7 +303,10 @@ function CoverThumb({ game, className, frame = false }) {
           {platinum ? (
             <Award className="w-3.5 h-3.5 text-indigo-300" />
           ) : (
-            <CheckCircle2 className="w-3.5 h-3.5 text-amber-300" />
+            <Trophy
+              className="w-3.5 h-3.5 text-amber-300"
+              style={{ filter: "drop-shadow(0 0 3px #f59e0b) drop-shadow(0 0 6px #f59e0b)" }}
+            />
           )}
         </div>
       )}
@@ -353,6 +360,11 @@ export default function CompatHub() {
   // perfil está ativo (é dado leve e a mesma conta serve pra qualquer perfil).
   const [raProfile, setRaProfile] = useState(null);
 
+  // Cache de informações de franquia (lore geral + ordem recomendada de
+  // jogo), gerado por IA e guardado pra não precisar buscar de novo toda
+  // vez que a franquia for aberta. Chave = nome da franquia em minúsculo.
+  const [franchiseNotes, setFranchiseNotes] = useState({});
+
   const profile = profiles.find((p) => p.id === activeProfileId) || profiles[0];
 
   useEffect(() => {
@@ -372,6 +384,7 @@ export default function CompatHub() {
             setActiveProfileId(migrated[0].id);
           }
           setGames(parsed.games || []);
+          setFranchiseNotes(parsed.franchiseNotes || {});
         }
       } catch {
         // sem dados salvos ainda — segue com os padrões
@@ -397,15 +410,28 @@ export default function CompatHub() {
       .catch(() => {});
   }, []);
 
-  async function persist(nextProfiles, nextActiveProfileId, nextGames) {
+  async function persist(nextProfiles, nextActiveProfileId, nextGames, nextFranchiseNotes = franchiseNotes) {
     try {
       await storage.set(
         STORAGE_KEY,
-        JSON.stringify({ profiles: nextProfiles, activeProfileId: nextActiveProfileId, games: nextGames })
+        JSON.stringify({
+          profiles: nextProfiles,
+          activeProfileId: nextActiveProfileId,
+          games: nextGames,
+          franchiseNotes: nextFranchiseNotes,
+        })
       );
     } catch (e) {
       console.error("Erro ao salvar:", e);
     }
+  }
+
+  function updateFranchiseNotes(key, data) {
+    setFranchiseNotes((prev) => {
+      const next = { ...prev, [key]: data };
+      persist(profiles, activeProfileId, games, next);
+      return next;
+    });
   }
 
   // CORREÇÃO DE BUG (regressão de capas sumindo): antes, updateGames recebia
@@ -741,6 +767,20 @@ export default function CompatHub() {
         </button>
       </div>
 
+      {/* painel de franquia — aparece quando um filtro de franquia específico
+          está selecionado, com lore geral + ordem recomendada (cacheado) */}
+      {franchiseFilter !== "all" && (
+        <div className="max-w-6xl mx-auto px-5 pt-2">
+          <p className="text-xs text-zinc-500 mb-1.5">Franquia: <span className="text-zinc-300">{franchiseFilter}</span></p>
+          <FranchiseOrderSection
+            franchise={franchiseFilter}
+            games={games}
+            cached={franchiseNotes[franchiseFilter.toLowerCase()]}
+            onSave={(data) => updateFranchiseNotes(franchiseFilter.toLowerCase(), data)}
+          />
+        </div>
+      )}
+
       {/* grid */}
       <div className="max-w-6xl mx-auto px-5 py-6">
         {filteredGames.length === 0 ? (
@@ -847,11 +887,14 @@ export default function CompatHub() {
           onUpdateGoals={(goals) => updateGame(activeGame.id, { goals })}
           onToggleFavorite={() => toggleFavorite(activeGame.id)}
           onSetStatus={(status) => setGameStatus(activeGame.id, status)}
+          onToggleManualPlatinum={() => updateGame(activeGame.id, { manualPlatinum: !activeGame.manualPlatinum })}
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
           onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
           onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
           onApplyRaData={(patch) => updateGame(activeGame.id, patch)}
+          franchiseNotes={franchiseNotes}
+          onUpdateFranchiseNotes={updateFranchiseNotes}
           onRemove={() => removeGame(activeGame.id)}
         />
       )}
@@ -1168,18 +1211,24 @@ function ProfileModal({ profiles, activeProfileId, games = [], raProfile, onClos
         {editing.raLinked && (
           <div className="mb-4 bg-zinc-950 border border-indigo-800/60 rounded-lg p-3">
             {raProfile ? (
-              <div className="flex items-center gap-3">
-                {raProfile.avatarUrl && (
-                  <img src={raProfile.avatarUrl} alt="" className="w-11 h-11 rounded-full ring-2 ring-indigo-400" />
-                )}
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{raProfile.username}</p>
-                  <p className="text-xs text-zinc-500">
-                    {raProfile.points} pts · {raProfile.truePoints} true pts
-                    {raProfile.rank ? ` · rank #${raProfile.rank}` : ""}
-                  </p>
+              <>
+                <div className="flex items-center gap-3">
+                  {raProfile.avatarUrl && (
+                    <img src={raProfile.avatarUrl} alt="" className="w-11 h-11 rounded-full ring-2 ring-indigo-400" />
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{raProfile.username}</p>
+                    <p className="text-xs text-zinc-500">
+                      {raProfile.points} pts · {raProfile.truePoints} true pts
+                      {raProfile.rank ? ` · rank #${raProfile.rank}` : ""}
+                    </p>
+                  </div>
                 </div>
-              </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600 mt-2">
+                  {raProfile.memberSince && <span>na RA desde {formatDate(raProfile.memberSince)}</span>}
+                  {raProfile.recentGameTitle && <span>jogando: <span className="text-zinc-400">{raProfile.recentGameTitle}</span></span>}
+                </div>
+              </>
             ) : (
               <p className="text-xs text-zinc-500">Conta RA não configurada no servidor (ou ainda carregando).</p>
             )}
@@ -1498,15 +1547,12 @@ function RetroAchievementsSection({
   );
 }
 
-// Metadados + resumo histórico/lore do jogo, gerados por IA (funciona pra
-// qualquer plataforma, diferente da seção de RA). Busca uma vez só e guarda
-// em game.loreData — só refaz a chamada se o usuário clicar em "atualizar".
-// Ordem recomendada de jogo dentro de uma franquia, via IA (o RA tem um
+// Lore geral da franquia + ordem recomendada de jogo, via IA (o RA tem um
 // recurso parecido no site — "Hubs" — mas não está exposto na API pública).
 // Cruza com os jogos da própria biblioteca que têm o mesmo texto em
-// "Franquia".
-function FranchiseOrderSection({ franchise, games }) {
-  const [result, setResult] = useState(null);
+// "Franquia". Usa um cache compartilhado (guardado no app) — busca só na
+// primeira vez que a franquia é aberta, igual ao GameLoreSection.
+function FranchiseOrderSection({ franchise, games, cached, onSave }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -1528,13 +1574,18 @@ function FranchiseOrderSection({ franchise, games }) {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
-      setResult(body);
+      onSave(body);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!cached && siblings.length >= 2) fetchOrder();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [franchise, siblings.length]);
 
   if (siblings.length < 2) {
     return (
@@ -1556,9 +1607,15 @@ function FranchiseOrderSection({ franchise, games }) {
           className="flex items-center gap-1.5 text-xs text-indigo-300 hover:text-indigo-200 disabled:opacity-40 transition-colors shrink-0"
         >
           {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Target className="w-3.5 h-3.5" />}
-          {result ? "atualizar ordem" : "ver ordem recomendada"}
+          {cached ? "atualizar" : "buscar"}
         </button>
       </div>
+
+      {loading && !cached && (
+        <p className="flex items-center gap-1.5 text-xs text-zinc-500 mt-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> buscando contexto da franquia...
+        </p>
+      )}
 
       {error && (
         <p className="flex items-center gap-1.5 text-xs text-rose-400 mt-2">
@@ -1566,11 +1623,11 @@ function FranchiseOrderSection({ franchise, games }) {
         </p>
       )}
 
-      {result && (
+      {cached && (
         <div className="mt-2 pt-2 border-t border-zinc-800">
-          {result.summary && <p className="text-xs text-zinc-500 mb-2">{result.summary}</p>}
+          {cached.summary && <p className="text-xs text-zinc-500 mb-2 leading-relaxed">{cached.summary}</p>}
           <ol className="space-y-1.5">
-            {(result.order || []).map((item, i) => {
+            {(cached.order || []).map((item, i) => {
               const match = siblings.find((g) => g.name === item.name);
               return (
                 <li key={i} className="flex items-start gap-2 text-xs">
@@ -1671,14 +1728,18 @@ function GameLoreSection({ game, onApplyLore }) {
 
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
-  onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus,
+  onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
   onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onSaveTranslations, onApplyRaData,
+  franchiseNotes, onUpdateFranchiseNotes,
   onRemove,
 }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
   const [franchiseText, setFranchiseText] = useState(game.franchise || "");
+  useEffect(() => {
+    setFranchiseText(game.franchise || "");
+  }, [game.franchise]);
   const [showHistory, setShowHistory] = useState(false);
   const [viewedProfileId, setViewedProfileId] = useState(activeProfileId);
   const allAnalyses = game.analyses || [];
@@ -1729,10 +1790,19 @@ function GameDetailModal({
 
           {/* metadados + lore/história do jogo (gerado por IA, funciona pra
               qualquer plataforma) — fica antes dos status, como pedido */}
-          <GameLoreSection game={game} onApplyLore={(patch) => onApplyRaData({ loreData: patch })} />
+          <GameLoreSection
+            game={game}
+            onApplyLore={(patch) => {
+              const next = { loreData: patch };
+              // só preenche a franquia sozinho se o campo ainda estiver
+              // vazio — nunca sobrescreve o que o usuário já escreveu
+              if (!game.franchise && patch.franchise) next.franchise = patch.franchise;
+              onApplyRaData(next);
+            }}
+          />
 
           {/* status: quero jogar / jogando / zerado / abandonado */}
-          <div className="flex flex-wrap gap-1.5 mb-6">
+          <div className="flex flex-wrap gap-1.5 mb-2">
             {STATUSES.map((s) => (
               <button
                 key={s.id}
@@ -1745,6 +1815,26 @@ function GameDetailModal({
               </button>
             ))}
           </div>
+
+          {/* platinado manual — só pra plataformas onde o CompactHub NÃO lê
+              conquistas via API (tudo, exceto Retro/ISO, que já é automático
+              via RetroAchievements). O usuário sinaliza que zerou as
+              conquistas na própria loja (GOG, Steam, etc). */}
+          {game.platform !== "retro" && (
+            <button
+              onClick={() => onToggleManualPlatinum()}
+              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors mb-6 ${
+                game.manualPlatinum
+                  ? "bg-indigo-950/60 border-indigo-600 text-indigo-300"
+                  : "bg-transparent border-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+              title="Marca como platinado mesmo sem conquistas do RetroAchievements (ex: 100% na GOG/Steam/Epic)"
+            >
+              <Award className="w-3.5 h-3.5" />
+              Platinado
+            </button>
+          )}
+          {game.platform === "retro" && <div className="mb-6" />}
 
           {/* conquistas via RetroAchievements — só faz sentido pra jogos
               retrô/ISO rodando via emulador, que é o que a RA cobre */}
@@ -1800,7 +1890,12 @@ function GameDetailModal({
           </div>
 
           {franchiseText.trim() && (
-            <FranchiseOrderSection franchise={franchiseText.trim()} games={games} />
+            <FranchiseOrderSection
+              franchise={franchiseText.trim()}
+              games={games}
+              cached={franchiseNotes[franchiseText.trim().toLowerCase()]}
+              onSave={(data) => onUpdateFranchiseNotes(franchiseText.trim().toLowerCase(), data)}
+            />
           )}
 
           {/* objetivos */}
