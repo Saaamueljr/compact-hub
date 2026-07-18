@@ -186,10 +186,13 @@ async function callAnalysis({ profile, game, notesText }) {
 
 // Gera um conjunto de "estrelas" com posições pseudo-aleatórias e ESTÁVEIS
 // pro mesmo jogo (mesma seed = mesmo layout, mas cada jogo tem o seu, sem
-// padrão repetido entre capas). Ficam espalhadas numa faixa perto da borda
-// (não no meio da capa, pra não cobrir a arte do jogo) e piscam de forma
-// independente — sem nenhum movimento circular/uniforme entre elas.
-function useFrameStars(seed, count = 16) {
+// padrão repetido entre capas). Piscam de forma independente — sem nenhum
+// movimento circular/uniforme entre elas.
+// mode "edge": espalhadas numa faixa perto da borda (pra usar em cima da
+//   capa, sem cobrir a arte do jogo).
+// mode "field": espalhadas por toda a área (pra usar como fundo denso atrás
+//   de texto, numa área sólida escura).
+function useFrameStars(seed, count = 16, mode = "edge") {
   return useMemo(() => {
     let s = 0;
     const str = String(seed);
@@ -200,59 +203,74 @@ function useFrameStars(seed, count = 16) {
     }
     const stars = [];
     for (let i = 0; i < count; i++) {
-      const edge = Math.floor(rand() * 4); // 0 topo, 1 direita, 2 baixo, 3 esquerda
-      const along = rand() * 100;
-      const inset = 1 + rand() * 9;
       let top, left;
-      if (edge === 0) { top = inset; left = along; }
-      else if (edge === 1) { top = along; left = 100 - inset; }
-      else if (edge === 2) { top = 100 - inset; left = along; }
-      else { top = along; left = inset; }
+      if (mode === "field") {
+        top = rand() * 100;
+        left = rand() * 100;
+      } else {
+        const edge = Math.floor(rand() * 4); // 0 topo, 1 direita, 2 baixo, 3 esquerda
+        const along = rand() * 100;
+        const inset = 1 + rand() * 9;
+        if (edge === 0) { top = inset; left = along; }
+        else if (edge === 1) { top = along; left = 100 - inset; }
+        else if (edge === 2) { top = 100 - inset; left = along; }
+        else { top = along; left = inset; }
+      }
       stars.push({
         top: `${top}%`,
         left: `${left}%`,
-        size: 1 + rand() * 2.2,
+        size: 1 + rand() * (mode === "field" ? 1.8 : 2.2),
         delay: `${(rand() * 4.5).toFixed(2)}s`,
         duration: `${(2 + rand() * 3).toFixed(2)}s`,
       });
     }
     return stars;
-  }, [seed, count]);
+  }, [seed, count, mode]);
 }
 
 const FRAME_THEMES = {
   // zerado — dourado, inspirado nos troféus (não é uma cópia literal)
   gold: {
-    border: "linear-gradient(135deg, #fde68a 0%, #f59e0b 35%, #92400e 60%, #f59e0b 85%, #fde68a 100%)",
+    solid: "#d97706",
+    highlight: "#fde68a",
     glow: "rgba(245, 158, 11, 0.5)",
     star: "#fff6da",
   },
-  // platinado — "galáxia" azul profundo
+  // platinado — "galáxia" azul royal profundo
   galaxy: {
-    border: "linear-gradient(135deg, #a5b4fc 0%, #4338ca 30%, #1e1b4b 55%, #312e81 80%, #818cf8 100%)",
+    solid: "#3730a3",
+    highlight: "#a5b4fc",
     glow: "rgba(79, 70, 229, 0.55)",
     star: "#e0e7ff",
   },
 };
 
-function FrameOverlay({ variant, seed }) {
+// "Platinado" (RA automático ou marcação manual) → azul-galáxia.
+// "Zerado" → dourado. Usado tanto pra moldura quanto pro selo do troféu.
+function frameVariantOf(game) {
+  if (isPlatinum(game)) return "galaxy";
+  if (game.status === "completed") return "gold";
+  return null;
+}
+
+// Moldura "premium" ao redor do card INTEIRO (capa + informações), não só
+// da capa — dois anéis (borda sólida + friso interno mais claro) com brilho
+// e cantos arredondados de verdade (border-radius normal, sem mask/
+// border-image, que não renderizavam de forma confiável em cima da capa).
+function CardFrame({ variant, seed, rounded = "rounded-xl" }) {
   const theme = FRAME_THEMES[variant];
-  const stars = useFrameStars(`${variant}-${seed}`);
+  const stars = useFrameStars(`edge-${variant}-${seed}`, 18, "edge");
   if (!theme) return null;
-  const T = 4; // espessura da moldura em px
-  const stripStyle = {
-    background: theme.border,
-    boxShadow: `0 0 10px 1px ${theme.glow}`,
-  };
   return (
-    <div className="absolute inset-0 pointer-events-none z-10" aria-hidden="true">
-      {/* moldura desenhada como 4 tarjas sólidas (não depende de mask/
-          border-image, que não renderizavam de forma confiável em cima da
-          capa) — sempre visível, em qualquer navegador */}
-      <div className="absolute top-0 left-0 right-0" style={{ height: T, ...stripStyle }} />
-      <div className="absolute bottom-0 left-0 right-0" style={{ height: T, ...stripStyle }} />
-      <div className="absolute top-0 bottom-0 left-0" style={{ width: T, ...stripStyle }} />
-      <div className="absolute top-0 bottom-0 right-0" style={{ width: T, ...stripStyle }} />
+    <div className={`absolute inset-0 pointer-events-none z-20 ${rounded}`} aria-hidden="true">
+      <div
+        className={`absolute inset-0 ${rounded}`}
+        style={{
+          border: `3px solid ${theme.solid}`,
+          boxShadow: `0 0 18px 2px ${theme.glow}, inset 0 0 16px 0 ${theme.glow}`,
+        }}
+      />
+      <div className={`absolute inset-[3px] ${rounded}`} style={{ border: `1px solid ${theme.highlight}`, opacity: 0.6 }} />
       {stars.map((star, i) => (
         <span
           key={i}
@@ -272,12 +290,40 @@ function FrameOverlay({ variant, seed }) {
   );
 }
 
+// Fundo de estrelas mais denso — pra usar atrás do texto/informações do
+// jogo (fundo escuro), não em cima da capa. Fica no fundo (z-0); quem usa
+// precisa colocar o conteúdo de texto num wrapper "relative z-10" por cima.
+function StarField({ variant, seed, count = 30 }) {
+  const theme = FRAME_THEMES[variant];
+  const stars = useFrameStars(`field-${variant}-${seed}`, count, "field");
+  if (!theme) return null;
+  return (
+    <div className="absolute inset-0 pointer-events-none -z-10 overflow-hidden" aria-hidden="true">
+      {stars.map((star, i) => (
+        <span
+          key={i}
+          className="absolute rounded-full"
+          style={{
+            top: star.top,
+            left: star.left,
+            width: star.size,
+            height: star.size,
+            background: theme.star,
+            opacity: 0.8,
+            boxShadow: `0 0 2px 1px ${theme.star}`,
+            animation: `chub-twinkle ${star.duration} ease-in-out ${star.delay} infinite`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function CoverThumb({ game, className, frame = false }) {
   const [failed, setFailed] = useState(false);
   const hasCover = game.coverUrl && !failed;
-  const platinum = frame && isPlatinum(game);
-  const completed = frame && !platinum && game.status === "completed";
-  const variant = platinum ? "galaxy" : completed ? "gold" : null;
+  const variant = frame ? frameVariantOf(game) : null;
+  const platinum = variant === "galaxy";
 
   return (
     <div className={`relative overflow-hidden bg-zinc-800 ${className}`}>
@@ -294,7 +340,6 @@ function CoverThumb({ game, className, frame = false }) {
           <span className="text-zinc-600 text-xs px-2 text-center line-clamp-2">{game.name}</span>
         </div>
       )}
-      {variant && <FrameOverlay variant={variant} seed={game.id} />}
       {variant && (
         <div
           className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-black/70 backdrop-blur flex items-center justify-center"
@@ -463,7 +508,7 @@ export default function CompatHub() {
     persist(profiles, id, games);
   }
 
-  function addGame({ name, platform, steamAppId, coverUrl }) {
+  function addGame({ name, platform, steamAppId, coverUrl, raGameId, raIconUrl, raProgress, raMeta }) {
     const finalCover = coverUrl?.trim() || steamCoverUrl(steamAppId?.trim());
     const newGame = {
       id: uid(),
@@ -478,6 +523,10 @@ export default function CompatHub() {
       status: null,
       franchise: "",
       runningVia: "",
+      raGameId: raGameId?.trim() || "",
+      raIconUrl: raIconUrl || "",
+      raProgress: raProgress || null,
+      raMeta: raMeta || null,
       createdAt: new Date().toISOString(),
     };
     updateGames((prev) => [newGame, ...prev]);
@@ -805,6 +854,7 @@ export default function CompatHub() {
             {filteredGames.map((game) => {
               const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
               const gameStatus = statusOf(game.status);
+              const variant = frameVariantOf(game);
               return (
                 <div
                   key={game.id}
@@ -812,7 +862,7 @@ export default function CompatHub() {
                 >
                   <button
                     onClick={(e) => { e.stopPropagation(); toggleFavorite(game.id); }}
-                    className="absolute top-2 left-2 z-10 w-7 h-7 rounded-full bg-black/60 backdrop-blur flex items-center justify-center hover:bg-black/80 transition-colors"
+                    className="absolute top-2 left-2 z-30 w-7 h-7 rounded-full bg-black/60 backdrop-blur flex items-center justify-center hover:bg-black/80 transition-colors"
                     aria-label="Favoritar"
                   >
                     <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-300"}`} />
@@ -820,35 +870,39 @@ export default function CompatHub() {
                   <button onClick={() => setActiveGameId(game.id)} className="text-left w-full">
                     <div className="relative">
                       <CoverThumb game={game} frame className="aspect-video group-hover:opacity-90 transition-opacity" />
-                      <div className="absolute top-2 right-2">
+                      <div className="absolute top-2 right-2 z-30">
                         <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
                       </div>
                     </div>
-                    <div className="p-3">
-                      <p className="text-sm font-medium line-clamp-1">{game.name}</p>
-                      {(game.raProgress || game.runningVia) && (
-                        <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500">
-                          {game.raProgress && (
-                            <span className="flex items-center gap-1">
-                              <Trophy className="w-3 h-3 text-amber-500" />
-                              {game.raProgress.numAwardedToUser}/{game.raProgress.numAchievements}
+                    <div className="relative overflow-hidden p-3">
+                      {variant && <StarField variant={variant} seed={game.id} count={22} />}
+                      <div className="relative z-10">
+                        <p className="text-sm font-medium line-clamp-1">{game.name}</p>
+                        {(game.raProgress || game.runningVia) && (
+                          <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500">
+                            {game.raProgress && (
+                              <span className="flex items-center gap-1">
+                                <Trophy className="w-3 h-3 text-amber-500" />
+                                {game.raProgress.numAwardedToUser}/{game.raProgress.numAchievements}
+                              </span>
+                            )}
+                            {game.runningVia && <span className="truncate">{game.runningVia}</span>}
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between mt-2 gap-2">
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
+                            {platformOf(game.platform).label}
+                          </span>
+                          {gameStatus && (
+                            <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${gameStatus.badge}`}>
+                              {gameStatus.label}
                             </span>
                           )}
-                          {game.runningVia && <span className="truncate">{game.runningVia}</span>}
                         </div>
-                      )}
-                      <div className="flex items-center justify-between mt-2 gap-2">
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-                          {platformOf(game.platform).label}
-                        </span>
-                        {gameStatus && (
-                          <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${gameStatus.badge}`}>
-                            {gameStatus.label}
-                          </span>
-                        )}
                       </div>
                     </div>
                   </button>
+                  {variant && <CardFrame variant={variant} seed={game.id} rounded="rounded-xl" />}
                 </div>
               );
             })}
@@ -902,13 +956,17 @@ export default function CompatHub() {
   );
 }
 
-function ModalShell({ children, onClose, maxW = "max-w-lg" }) {
+function ModalShell({ children, onClose, maxW = "max-w-lg", frameVariant, frameSeed }) {
   return (
     <div className="fixed inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-      <div
-        className={`w-full ${maxW} bg-zinc-900 border border-zinc-800 rounded-2xl max-h-screen overflow-y-auto`}
-      >
-        {children}
+      <div className={`relative w-full ${maxW} max-h-screen`}>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-h-screen overflow-y-auto">
+          {children}
+        </div>
+        {/* a moldura fica num wrapper à parte (não-scrollável) do lado de
+            fora do conteúdo, senão ela rolaria junto com o scroll interno
+            do modal em vez de ficar fixa ao redor do card inteiro */}
+        {frameVariant && <CardFrame variant={frameVariant} seed={frameSeed} rounded="rounded-2xl" />}
       </div>
       <button
         onClick={onClose}
@@ -929,12 +987,38 @@ function AddGameModal({ games, onClose, onAdd }) {
   const [searchingCover, setSearchingCover] = useState(false);
   const [coverSearchError, setCoverSearchError] = useState("");
 
-  const previewCover = coverUrl.trim() || steamCoverUrl(steamAppId.trim());
+  const [raGameId, setRaGameId] = useState("");
+  const [raData, setRaData] = useState(null);
+  const [searchingRa, setSearchingRa] = useState(false);
+  const [raError, setRaError] = useState("");
+
+  const previewCover = raData?.boxArtUrl || coverUrl.trim() || steamCoverUrl(steamAppId.trim());
 
   const trimmedName = name.trim().toLowerCase();
   const duplicate = trimmedName
     ? (games || []).find((g) => g.name.trim().toLowerCase() === trimmedName)
     : null;
+
+  // Pra jogos Retro/ISO, o ID do RA já traz tudo de uma vez: título oficial,
+  // capa, ícone e progresso de conquistas — sem precisar de um segundo passo
+  // depois de criar o jogo.
+  async function searchRaGame() {
+    if (!raGameId.trim()) return;
+    setSearchingRa(true);
+    setRaError("");
+    try {
+      const res = await fetch(`/api/retroachievements?gameId=${encodeURIComponent(raGameId.trim())}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      setRaData(body);
+      if (!name.trim()) setName(body.gameTitle);
+    } catch (e) {
+      setRaError(e.message);
+      setRaData(null);
+    } finally {
+      setSearchingRa(false);
+    }
+  }
 
   // GOG/Epic/Amazon não têm um "ID" público consultável pra puxar capa —
   // então buscamos pelo NOME no SteamGridDB (banco comunitário de capas,
@@ -1034,7 +1118,43 @@ function AddGameModal({ games, onClose, onAdd }) {
             )}
           </div>
         )}
-        {platform === "retro" && <div className="mb-6" />}
+        {platform === "retro" && (
+          <div className="mb-6 mt-2">
+            <label className="text-xs text-zinc-400 mb-1 block">ID do jogo no RetroAchievements</label>
+            <div className="flex gap-2">
+              <input
+                value={raGameId}
+                onChange={(e) => { setRaGameId(e.target.value); setRaData(null); }}
+                placeholder="ex: 1163"
+                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+              />
+              <button
+                type="button"
+                disabled={!raGameId.trim() || searchingRa}
+                onClick={searchRaGame}
+                className="flex items-center gap-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 px-3 rounded-lg transition-colors"
+              >
+                {searchingRa ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                Buscar
+              </button>
+            </div>
+            {raError && (
+              <p className="flex items-center gap-1.5 text-xs text-rose-400 mt-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {raError}
+              </p>
+            )}
+            {raData && (
+              <p className="flex items-center gap-1.5 text-xs text-emerald-400 mt-1.5">
+                {raData.imageIcon && <img src={raData.imageIcon} alt="" className="w-4 h-4 rounded" />}
+                {raData.gameTitle} · {raData.consoleName} · {raData.numAchievements} conquistas
+              </p>
+            )}
+            <p className="text-xs text-zinc-600 mt-1">
+              O ID é o número que aparece na URL da página do jogo em retroachievements.org/game/&lt;ID&gt;.
+              Traz título, capa, ícone e progresso automaticamente.
+            </p>
+          </div>
+        )}
 
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="text-sm text-zinc-400 hover:text-zinc-200 px-4 py-2 transition-colors">
@@ -1042,7 +1162,20 @@ function AddGameModal({ games, onClose, onAdd }) {
           </button>
           <button
             disabled={!name.trim()}
-            onClick={() => onAdd({ name, platform, steamAppId, coverUrl })}
+            onClick={() => onAdd({
+              name,
+              platform,
+              steamAppId,
+              coverUrl: raData?.boxArtUrl || coverUrl,
+              raGameId: raData ? raGameId : "",
+              raIconUrl: raData?.imageIcon || "",
+              raProgress: raData
+                ? { numAwardedToUser: raData.numAwardedToUser, numAchievements: raData.numAchievements }
+                : null,
+              raMeta: raData
+                ? { developer: raData.developer, publisher: raData.publisher, genre: raData.genre, released: raData.released }
+                : null,
+            })}
             className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2"
           >
             Adicionar
@@ -1224,10 +1357,49 @@ function ProfileModal({ profiles, activeProfileId, games = [], raProfile, onClos
                     </p>
                   </div>
                 </div>
+
+                {raProfile.motto && (
+                  <p className="text-xs text-indigo-300/80 italic mt-2">"{raProfile.motto}"</p>
+                )}
+
                 <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600 mt-2">
                   {raProfile.memberSince && <span>na RA desde {formatDate(raProfile.memberSince)}</span>}
-                  {raProfile.recentGameTitle && <span>jogando: <span className="text-zinc-400">{raProfile.recentGameTitle}</span></span>}
                 </div>
+
+                {raProfile.lastGame && (
+                  <p className="text-xs text-zinc-500 mt-2 pt-2 border-t border-zinc-800">
+                    Último jogo: <span className="text-zinc-300">{raProfile.lastGame.title}</span>
+                    {raProfile.lastGame.consoleName && <span className="text-zinc-600"> ({raProfile.lastGame.consoleName})</span>}
+                  </p>
+                )}
+
+                {raProfile.progressionByPlatform?.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-zinc-800">
+                    <p className="text-xs text-zinc-500 mb-1">Progressão por plataforma</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {raProfile.progressionByPlatform.slice(0, 8).map((p) => (
+                        <span key={p.console} className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400">
+                          {p.console}: {p.masteredCount}/{p.gamesCount}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {raProfile.recentAchievements?.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-zinc-800">
+                    <p className="text-xs text-zinc-500 mb-1">Progresso recente</p>
+                    <div className="space-y-1">
+                      {raProfile.recentAchievements.map((a, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          {a.badgeUrl && <img src={a.badgeUrl} alt="" className="w-5 h-5 rounded shrink-0" />}
+                          <span className="text-zinc-400 truncate">{a.title}</span>
+                          <span className="text-zinc-600 truncate shrink-0">— {a.gameTitle}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <p className="text-xs text-zinc-500">Conta RA não configurada no servidor (ou ainda carregando).</p>
@@ -1737,6 +1909,23 @@ function GameDetailModal({
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
   const [franchiseText, setFranchiseText] = useState(game.franchise || "");
+  const [fetchingCover, setFetchingCover] = useState(false);
+  const [coverError, setCoverError] = useState("");
+
+  async function fetchCoverArt() {
+    setFetchingCover(true);
+    setCoverError("");
+    try {
+      const res = await fetch(`/api/coverart?name=${encodeURIComponent(game.name)}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      onApplyRaData({ coverUrl: body.coverUrl });
+    } catch (e) {
+      setCoverError(e.message);
+    } finally {
+      setFetchingCover(false);
+    }
+  }
   useEffect(() => {
     setFranchiseText(game.franchise || "");
   }, [game.franchise]);
@@ -1752,10 +1941,26 @@ function GameDetailModal({
   const viewedProfile = profiles.find((p) => p.id === viewedProfileId);
 
   return (
-    <ModalShell onClose={onClose} maxW="max-w-2xl">
+    <ModalShell onClose={onClose} maxW="max-w-2xl" frameVariant={frameVariantOf(game)} frameSeed={game.id}>
       <div>
-        <CoverThumb game={game} frame className="w-full aspect-video" />
-        <div className="p-6">
+        <div className="relative">
+          <CoverThumb game={game} frame className="w-full aspect-video" />
+          {!game.coverUrl && game.platform !== "retro" && (
+            <div className="absolute bottom-2 right-2 z-30">
+              <button
+                onClick={fetchCoverArt}
+                disabled={fetchingCover}
+                className="flex items-center gap-1.5 text-xs bg-black/70 backdrop-blur text-indigo-300 hover:text-indigo-200 disabled:opacity-50 px-2.5 py-1.5 rounded-lg border border-zinc-700 transition-colors"
+              >
+                {fetchingCover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                Buscar capa (SteamGridDB)
+              </button>
+              {coverError && <p className="text-xs text-rose-400 mt-1 text-right max-w-[220px]">{coverError}</p>}
+            </div>
+          )}
+        </div>
+        <div className="relative overflow-hidden p-6">
+          {frameVariantOf(game) && <StarField variant={frameVariantOf(game)} seed={game.id} count={40} />}
           <div className="flex items-start justify-between gap-3 mb-1">
             <div className="flex items-center gap-2 min-w-0">
               {game.raIconUrl && (

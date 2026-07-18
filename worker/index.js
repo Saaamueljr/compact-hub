@@ -360,31 +360,72 @@ async function handleRetroAchievementsProfile(request, env) {
   const username = env.RA_USERNAME;
   if (!apiKey || !username) return json({ error: "RA não configurado no servidor." }, 500);
 
-  const raUrl = `https://retroachievements.org/API/API_GetUserSummary.php?u=${encodeURIComponent(
-    username
-  )}&y=${encodeURIComponent(apiKey)}`;
+  const qs = `u=${encodeURIComponent(username)}&y=${encodeURIComponent(apiKey)}`;
 
-  let raResponse;
-  try {
-    raResponse = await fetch(raUrl);
-  } catch (e) {
-    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  // Várias chamadas em paralelo — cada uma cobre uma parte do resumo do
+  // perfil. Uma falhar isoladamente não derruba as outras (Promise.allSettled).
+  const [summaryRes, profileRes, recentGameRes, recentAchRes, completionRes] = await Promise.allSettled([
+    fetch(`https://retroachievements.org/API/API_GetUserSummary.php?${qs}`).then((r) => (r.ok ? r.json() : null)),
+    fetch(`https://retroachievements.org/API/API_GetUserProfile.php?${qs}`).then((r) => (r.ok ? r.json() : null)),
+    fetch(`https://retroachievements.org/API/API_GetUserRecentlyPlayedGames.php?${qs}&c=1`).then((r) => (r.ok ? r.json() : null)),
+    fetch(`https://retroachievements.org/API/API_GetUserRecentAchievements.php?${qs}&m=10080`).then((r) => (r.ok ? r.json() : null)), // últimos 7 dias
+    fetch(`https://retroachievements.org/API/API_GetUserCompletionProgress.php?${qs}&c=500`).then((r) => (r.ok ? r.json() : null)),
+  ]);
+
+  const summary = summaryRes.status === "fulfilled" ? summaryRes.value : null;
+  const profileData = profileRes.status === "fulfilled" ? profileRes.value : null;
+  const recentGames = recentGameRes.status === "fulfilled" ? recentGameRes.value : null;
+  const recentAchievements = recentAchRes.status === "fulfilled" ? recentAchRes.value : null;
+  const completion = completionRes.status === "fulfilled" ? completionRes.value : null;
+
+  if (!summary && !profileData) {
+    return json({ error: "Não foi possível carregar o perfil do RetroAchievements." }, 502);
   }
-  if (!raResponse.ok) return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
-  const data = await raResponse.json().catch(() => null);
-  if (!data) return json({ error: "Não foi possível interpretar a resposta do RetroAchievements." }, 502);
+
+  const lastGameEntry = Array.isArray(recentGames) ? recentGames[0] : null;
+
+  // "Progression Status" — quantos jogos (e quantos 100%) por plataforma/
+  // console, agregado a partir do progresso completo do usuário.
+  let progressionByPlatform = [];
+  if (completion?.Results) {
+    const byConsole = {};
+    for (const g of completion.Results) {
+      const key = g.ConsoleName || "Outro";
+      if (!byConsole[key]) byConsole[key] = { console: key, gamesCount: 0, masteredCount: 0 };
+      byConsole[key].gamesCount += 1;
+      if (g.HighestAwardKind === "mastered" || g.HighestAwardKind === "completed") {
+        byConsole[key].masteredCount += 1;
+      }
+    }
+    progressionByPlatform = Object.values(byConsole).sort((a, b) => b.gamesCount - a.gamesCount);
+  }
+
+  const recentAchievementsList = Array.isArray(recentAchievements)
+    ? recentAchievements.slice(0, 6).map((a) => ({
+        title: a.Title,
+        gameTitle: a.GameTitle,
+        consoleName: a.ConsoleName,
+        points: a.Points,
+        date: a.Date,
+        badgeUrl: a.BadgeName ? `https://i.retroachievements.org/Badge/${a.BadgeName}.png` : null,
+      }))
+    : [];
 
   return json({
-    username: data.User || username,
-    avatarUrl: data.UserPic ? `https://media.retroachievements.org${data.UserPic}` : null,
-    rank: data.Rank ?? null,
-    points: data.TotalPoints ?? 0,
-    truePoints: data.TotalTruePoints ?? 0,
-    memberSince: data.MemberSince || null,
-    // esses dois campos variam de disponibilidade dependendo da conta/API —
-    // por isso são tratados como opcionais no front.
-    recentGameTitle: data.RecentlyPlayedCount > 0 ? data.RecentlyPlayed?.[0]?.Title || null : null,
-    totalGamesPlayed: data.TotalGamesPlayed ?? data.RecentlyPlayedCount ?? null,
+    username: summary?.User || profileData?.User || username,
+    avatarUrl: (summary?.UserPic || profileData?.UserPic)
+      ? `https://media.retroachievements.org${summary?.UserPic || profileData?.UserPic}`
+      : null,
+    rank: summary?.Rank ?? null,
+    points: summary?.TotalPoints ?? profileData?.TotalPoints ?? 0,
+    truePoints: summary?.TotalTruePoints ?? profileData?.TotalTruePoints ?? 0,
+    memberSince: summary?.MemberSince || profileData?.MemberSince || null,
+    motto: profileData?.Motto || null,
+    lastGame: lastGameEntry
+      ? { title: lastGameEntry.Title, consoleName: lastGameEntry.ConsoleName, lastPlayed: lastGameEntry.LastPlayed }
+      : null,
+    progressionByPlatform,
+    recentAchievements: recentAchievementsList,
   });
 }
 
