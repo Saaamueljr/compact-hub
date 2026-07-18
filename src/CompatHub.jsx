@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
@@ -76,6 +76,7 @@ function makeProfile(name, overrides = {}) {
     ram: "",
     os: "",
     preferences: "",
+    raLinked: false,
     ...overrides,
   };
 }
@@ -90,6 +91,7 @@ const DEFAULT_PROFILES = [
     os: "Windows 10 LTSC 2019 (1809)",
     preferences:
       "Prefiro estabilidade a gráficos altos. Aceito baixar resolução/textura antes de travar fps. Não me importo de aplicar patches da comunidade quando necessário.",
+    raLinked: false,
   },
 ];
 
@@ -177,66 +179,104 @@ async function callAnalysis({ profile, game, notesText }) {
   }
 }
 
-// Extrai uma cor média aproximada da capa (canvas 24x24, mais que suficiente
-// pra pegar a paleta geral) pra usar como cor da moldura personalizada.
-// Algumas CDNs (ex: capas antigas de certos hosts) não liberam CORS pra
-// leitura de pixel — nesse caso o canvas fica "tainted" e getImageData
-// lança erro; capturamos e caímos de volta pra uma cor fixa (ver CoverThumb).
-function useDominantColor(src) {
-  const [color, setColor] = useState(null);
-  useEffect(() => {
-    if (!src) {
-      setColor(null);
-      return;
+// Gera um conjunto de "estrelas" com posições pseudo-aleatórias e ESTÁVEIS
+// pro mesmo jogo (mesma seed = mesmo layout, mas cada jogo tem o seu, sem
+// padrão repetido entre capas). Ficam espalhadas numa faixa perto da borda
+// (não no meio da capa, pra não cobrir a arte do jogo) e piscam de forma
+// independente — sem nenhum movimento circular/uniforme entre elas.
+function useFrameStars(seed, count = 16) {
+  return useMemo(() => {
+    let s = 0;
+    const str = String(seed);
+    for (let i = 0; i < str.length; i++) s = (s * 31 + str.charCodeAt(i)) >>> 0;
+    function rand() {
+      s = (s * 1103515245 + 12345) >>> 0;
+      return (s % 10000) / 10000;
     }
-    let cancelled = false;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      if (cancelled) return;
-      try {
-        const size = 24;
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, size, size);
-        const { data } = ctx.getImageData(0, 0, size, size);
-        let r = 0, g = 0, b = 0, n = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i + 3] < 128) continue;
-          r += data[i]; g += data[i + 1]; b += data[i + 2]; n += 1;
-        }
-        if (n === 0) { setColor(null); return; }
-        const boost = (c) => Math.max(0, Math.min(255, Math.round((c / n) * 1.15)));
-        setColor(`rgb(${boost(r)}, ${boost(g)}, ${boost(b)})`);
-      } catch {
-        setColor(null); // canvas tainted por CORS — usa cor fixa de fallback
-      }
-    };
-    img.onerror = () => { if (!cancelled) setColor(null); };
-    img.src = src;
-    return () => { cancelled = true; };
-  }, [src]);
-  return color;
+    const stars = [];
+    for (let i = 0; i < count; i++) {
+      const edge = Math.floor(rand() * 4); // 0 topo, 1 direita, 2 baixo, 3 esquerda
+      const along = rand() * 100;
+      const inset = 1 + rand() * 9;
+      let top, left;
+      if (edge === 0) { top = inset; left = along; }
+      else if (edge === 1) { top = along; left = 100 - inset; }
+      else if (edge === 2) { top = 100 - inset; left = along; }
+      else { top = along; left = inset; }
+      stars.push({
+        top: `${top}%`,
+        left: `${left}%`,
+        size: 1 + rand() * 2.2,
+        delay: `${(rand() * 4.5).toFixed(2)}s`,
+        duration: `${(2 + rand() * 3).toFixed(2)}s`,
+      });
+    }
+    return stars;
+  }, [seed, count]);
+}
+
+const FRAME_THEMES = {
+  // zerado — dourado, inspirado nos troféus (não é uma cópia literal)
+  gold: {
+    border: "linear-gradient(135deg, #fde68a 0%, #f59e0b 35%, #92400e 60%, #f59e0b 85%, #fde68a 100%)",
+    glow: "rgba(245, 158, 11, 0.5)",
+    star: "#fff6da",
+  },
+  // platinado — "galáxia" azul profundo
+  galaxy: {
+    border: "linear-gradient(135deg, #a5b4fc 0%, #4338ca 30%, #1e1b4b 55%, #312e81 80%, #818cf8 100%)",
+    glow: "rgba(79, 70, 229, 0.55)",
+    star: "#e0e7ff",
+  },
+};
+
+function FrameOverlay({ variant, seed }) {
+  const theme = FRAME_THEMES[variant];
+  const stars = useFrameStars(`${variant}-${seed}`);
+  if (!theme) return null;
+  return (
+    <div className="absolute inset-0 rounded-[inherit] pointer-events-none" aria-hidden="true">
+      {/* moldura: gradiente aplicado só na "casca" via mask (border real, não
+          cobre a imagem) */}
+      <div
+        className="absolute inset-0 rounded-[inherit]"
+        style={{
+          padding: 3,
+          background: theme.border,
+          WebkitMask: "linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0)",
+          WebkitMaskComposite: "xor",
+          maskComposite: "exclude",
+          boxShadow: `0 0 16px 1px ${theme.glow}, inset 0 0 10px 0 ${theme.glow}`,
+        }}
+      />
+      {stars.map((star, i) => (
+        <span
+          key={i}
+          className="absolute rounded-full"
+          style={{
+            top: star.top,
+            left: star.left,
+            width: star.size,
+            height: star.size,
+            background: theme.star,
+            boxShadow: `0 0 3px 1px ${theme.star}`,
+            animation: `chub-twinkle ${star.duration} ease-in-out ${star.delay} infinite`,
+          }}
+        />
+      ))}
+    </div>
+  );
 }
 
 function CoverThumb({ game, className, frame = false }) {
   const [failed, setFailed] = useState(false);
   const hasCover = game.coverUrl && !failed;
   const platinum = frame && isPlatinum(game);
-  const completed = frame && game.status === "completed";
-  const shouldExtract = frame && hasCover && (platinum || completed);
-  const dominant = useDominantColor(shouldExtract ? game.coverUrl : null);
-  // Moldura "puxada pro jogo": usa a cor extraída da própria capa; se não
-  // der (CORS ou capa ausente), cai numa cor fixa por tipo de status.
-  const frameColor = platinum ? (dominant || "#f59e0b") : completed ? (dominant || "#10b981") : null;
+  const completed = frame && !platinum && game.status === "completed";
+  const variant = platinum ? "galaxy" : completed ? "gold" : null;
 
   return (
-    <div
-      className={`relative overflow-hidden bg-zinc-800 ${className}`}
-      style={frameColor ? { boxShadow: `inset 0 0 0 3px ${frameColor}, 0 0 16px -3px ${frameColor}` } : undefined}
-    >
+    <div className={`relative overflow-hidden bg-zinc-800 ${className}`}>
       {hasCover ? (
         <img
           src={game.coverUrl}
@@ -250,15 +290,16 @@ function CoverThumb({ game, className, frame = false }) {
           <span className="text-zinc-600 text-xs px-2 text-center line-clamp-2">{game.name}</span>
         </div>
       )}
-      {frame && (platinum || completed) && (
+      {variant && <FrameOverlay variant={variant} seed={game.id} />}
+      {variant && (
         <div
           className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-black/70 backdrop-blur flex items-center justify-center"
           title={platinum ? "Platinado (100% das conquistas)" : "Zerado"}
         >
           {platinum ? (
-            <Award className="w-3.5 h-3.5 text-amber-400" />
+            <Award className="w-3.5 h-3.5 text-indigo-300" />
           ) : (
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            <CheckCircle2 className="w-3.5 h-3.5 text-amber-300" />
           )}
         </div>
       )}
@@ -306,7 +347,11 @@ export default function CompatHub() {
 
   const [weeklyEvent, setWeeklyEvent] = useState(null);
   const [showWeeklyBanner, setShowWeeklyBanner] = useState(false);
-  const [raSummary, setRaSummary] = useState(null);
+  // Perfil da conta RA (avatar, rank, pontos) — só é EXIBIDO quando o perfil
+  // de hardware ativo estiver marcado como vinculado ao RA (raLinked), no
+  // painel de escolha de perfil. É buscado uma vez, sem depender de qual
+  // perfil está ativo (é dado leve e a mesma conta serve pra qualquer perfil).
+  const [raProfile, setRaProfile] = useState(null);
 
   const profile = profiles.find((p) => p.id === activeProfileId) || profiles[0];
 
@@ -336,17 +381,19 @@ export default function CompatHub() {
     })();
   }, []);
 
-  // Evento da semana (Achievement of the Week) e resumo da conta do RA —
+  // Evento da semana (Achievement of the Week) e perfil da conta do RA —
   // buscados uma vez ao abrir o app. Falha silenciosamente se o RA não
-  // estiver configurado no servidor (env RA_USERNAME/RA_API_KEY).
+  // estiver configurado no servidor (env RA_USERNAME/RA_API_KEY). O perfil
+  // do RA só é mostrado na UI quando o perfil de hardware ativo tiver
+  // raLinked=true (ver painel de escolha de perfil).
   useEffect(() => {
     fetch("/api/retroachievements/week")
       .then((r) => (r.ok ? r.json() : null))
       .then((body) => { if (body) { setWeeklyEvent(body); setShowWeeklyBanner(true); } })
       .catch(() => {});
-    fetch("/api/retroachievements/summary")
+    fetch("/api/retroachievements/profile")
       .then((r) => (r.ok ? r.json() : null))
-      .then((body) => { if (body) setRaSummary(body); })
+      .then((body) => { if (body) setRaProfile(body); })
       .catch(() => {});
   }, []);
 
@@ -554,29 +601,16 @@ export default function CompatHub() {
           </div>
 
           <div className="hidden md:flex items-center gap-2 ml-2">
-            <select
-              value={activeProfileId}
-              onChange={(e) => switchProfile(e.target.value)}
-              className="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-xs text-zinc-300 outline-none max-w-[140px]"
-            >
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
+            <ProfileSwitcher
+              profiles={profiles}
+              activeProfileId={activeProfileId}
+              raProfile={raProfile}
+              onSwitch={switchProfile}
+            />
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.cpu}</span>
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.gpu}</span>
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.ram}</span>
           </div>
-
-          {raSummary && (
-            <span
-              className="hidden sm:flex items-center gap-1.5 text-xs text-amber-300 bg-amber-950/30 border border-amber-800 rounded-md px-2.5 py-1.5"
-              title="Pontos da sua conta no RetroAchievements (conta única — não é separado por PC/perfil)"
-            >
-              <Trophy className="w-3.5 h-3.5" />
-              {raSummary.points} pts
-            </span>
-          )}
 
           <button
             onClick={() => setShowProfile(true)}
@@ -791,6 +825,7 @@ export default function CompatHub() {
           profiles={profiles}
           activeProfileId={activeProfileId}
           games={games}
+          raProfile={raProfile}
           onClose={() => setShowProfile(false)}
           onSave={(nextProfiles, nextActiveId) => { updateProfiles(nextProfiles, nextActiveId); setShowProfile(false); }}
         />
@@ -800,6 +835,7 @@ export default function CompatHub() {
       {activeGame && (
         <GameDetailModal
           game={activeGame}
+          games={games}
           analyzing={!!analyzing[activeGame.id]}
           error={errors[activeGame.id]}
           activeProfileId={activeProfileId}
@@ -847,6 +883,8 @@ function AddGameModal({ games, onClose, onAdd }) {
   const [platform, setPlatform] = useState("steam");
   const [steamAppId, setSteamAppId] = useState("");
   const [coverUrl, setCoverUrl] = useState("");
+  const [searchingCover, setSearchingCover] = useState(false);
+  const [coverSearchError, setCoverSearchError] = useState("");
 
   const previewCover = coverUrl.trim() || steamCoverUrl(steamAppId.trim());
 
@@ -854,6 +892,25 @@ function AddGameModal({ games, onClose, onAdd }) {
   const duplicate = trimmedName
     ? (games || []).find((g) => g.name.trim().toLowerCase() === trimmedName)
     : null;
+
+  // GOG/Epic/Amazon não têm um "ID" público consultável pra puxar capa —
+  // então buscamos pelo NOME no SteamGridDB (banco comunitário de capas,
+  // cobre praticamente qualquer jogo de qualquer loja).
+  async function searchCoverArt() {
+    if (!name.trim()) return;
+    setSearchingCover(true);
+    setCoverSearchError("");
+    try {
+      const res = await fetch(`/api/coverart?name=${encodeURIComponent(name.trim())}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      setCoverUrl(body.coverUrl);
+    } catch (e) {
+      setCoverSearchError(e.message);
+    } finally {
+      setSearchingCover(false);
+    }
+  }
 
   return (
     <ModalShell onClose={onClose}>
@@ -913,8 +970,28 @@ function AddGameModal({ games, onClose, onAdd }) {
           value={coverUrl}
           onChange={(e) => setCoverUrl(e.target.value)}
           placeholder="https://..."
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-6 outline-none focus:border-indigo-600"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
         />
+
+        {platform !== "retro" && (
+          <div className="mb-6 mt-2">
+            <button
+              type="button"
+              disabled={!name.trim() || searchingCover}
+              onClick={searchCoverArt}
+              className="flex items-center gap-1.5 text-xs text-indigo-300 hover:text-indigo-200 disabled:opacity-40 transition-colors"
+            >
+              {searchingCover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+              Buscar capa automaticamente (SteamGridDB, pelo nome)
+            </button>
+            {coverSearchError && (
+              <p className="flex items-center gap-1.5 text-xs text-rose-400 mt-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {coverSearchError}
+              </p>
+            )}
+          </div>
+        )}
+        {platform === "retro" && <div className="mb-6" />}
 
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="text-sm text-zinc-400 hover:text-zinc-200 px-4 py-2 transition-colors">
@@ -933,7 +1010,66 @@ function AddGameModal({ games, onClose, onAdd }) {
   );
 }
 
-function ProfileModal({ profiles, activeProfileId, games = [], onClose, onSave }) {
+// Dropdown customizado pra trocar de perfil de hardware (substitui o
+// <select> nativo, que não permite mostrar imagem/avatar nas opções). O
+// perfil marcado como raLinked mostra o avatar da conta RA em vez do ícone
+// genérico — tanto no botão (quando ativo) quanto na lista.
+function ProfileSwitcher({ profiles, activeProfileId, raProfile, onSwitch }) {
+  const [open, setOpen] = useState(false);
+  const active = profiles.find((p) => p.id === activeProfileId) || profiles[0];
+  const activeIsRaLinked = active?.raLinked && raProfile?.avatarUrl;
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-md pl-1.5 pr-2 py-1 text-xs text-zinc-300 hover:border-zinc-600 transition-colors max-w-[160px]"
+      >
+        {activeIsRaLinked ? (
+          <img src={raProfile.avatarUrl} alt="" className="w-5 h-5 rounded-full ring-1 ring-indigo-400" />
+        ) : (
+          <span className="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center">
+            <Users className="w-3 h-3 text-zinc-500" />
+          </span>
+        )}
+        <span className="truncate">{active?.name}</span>
+        <ChevronDown className="w-3 h-3 shrink-0 text-zinc-500" />
+      </button>
+
+      {open && (
+        <>
+          {/* overlay só pra fechar ao clicar fora — não usa listener global */}
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full mt-1 z-40 min-w-[180px] bg-zinc-900 border border-zinc-800 rounded-lg shadow-lg shadow-black/40 py-1">
+            {profiles.map((p) => {
+              const showAvatar = p.raLinked && raProfile?.avatarUrl;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => { onSwitch(p.id); setOpen(false); }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-zinc-800 transition-colors ${
+                    p.id === activeProfileId ? "text-indigo-300" : "text-zinc-300"
+                  }`}
+                >
+                  {showAvatar ? (
+                    <img src={raProfile.avatarUrl} alt="" className="w-5 h-5 rounded-full ring-1 ring-indigo-400 shrink-0" />
+                  ) : (
+                    <span className="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center shrink-0">
+                      <Users className="w-3 h-3 text-zinc-500" />
+                    </span>
+                  )}
+                  <span className="truncate">{p.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProfileModal({ profiles, activeProfileId, games = [], raProfile, onClose, onSave }) {
   const [list, setList] = useState(profiles);
   const [editingId, setEditingId] = useState(activeProfileId);
   const editing = list.find((p) => p.id === editingId) || list[0];
@@ -949,6 +1085,11 @@ function ProfileModal({ profiles, activeProfileId, games = [], onClose, onSave }
   ).length;
 
   function updateField(field, value) {
+    if (field === "raLinked" && value === true) {
+      // só um perfil pode estar vinculado à conta RA por vez
+      setList(list.map((p) => ({ ...p, raLinked: p.id === editing.id })));
+      return;
+    }
     setList(list.map((p) => (p.id === editing.id ? { ...p, [field]: value } : p)));
   }
 
@@ -1012,11 +1153,43 @@ function ProfileModal({ profiles, activeProfileId, games = [], onClose, onSave }
           />
         </div>
 
-        {raLinkedInProfile > 0 && (
-          <p className="flex items-center gap-1.5 text-xs text-amber-300 bg-amber-950/30 border border-amber-800 rounded-lg px-3 py-2 mb-4">
-            <Trophy className="w-3.5 h-3.5 shrink-0" />
-            {raLinkedInProfile} jogo(s) com RetroAchievements vinculado analisado(s) neste perfil
-          </p>
+        {/* vínculo com a conta RetroAchievements — só esse painel mostra
+            informações da conta RA em todo o app */}
+        <label className="flex items-center gap-2 mb-4 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={!!editing.raLinked}
+            onChange={(e) => updateField("raLinked", e.target.checked)}
+            className="w-4 h-4 accent-indigo-600"
+          />
+          <span className="text-xs text-zinc-300">Vincular conta RetroAchievements a este perfil</span>
+        </label>
+
+        {editing.raLinked && (
+          <div className="mb-4 bg-zinc-950 border border-indigo-800/60 rounded-lg p-3">
+            {raProfile ? (
+              <div className="flex items-center gap-3">
+                {raProfile.avatarUrl && (
+                  <img src={raProfile.avatarUrl} alt="" className="w-11 h-11 rounded-full ring-2 ring-indigo-400" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">{raProfile.username}</p>
+                  <p className="text-xs text-zinc-500">
+                    {raProfile.points} pts · {raProfile.truePoints} true pts
+                    {raProfile.rank ? ` · rank #${raProfile.rank}` : ""}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500">Conta RA não configurada no servidor (ou ainda carregando).</p>
+            )}
+            {raLinkedInProfile > 0 && (
+              <p className="flex items-center gap-1.5 text-xs text-amber-300 mt-2 pt-2 border-t border-zinc-800">
+                <Trophy className="w-3.5 h-3.5 shrink-0" />
+                {raLinkedInProfile} jogo(s) com RA vinculado analisado(s) neste perfil
+              </p>
+            )}
+          </div>
         )}
 
         {["cpu", "gpu", "ram", "os"].map((field) => (
@@ -1325,8 +1498,179 @@ function RetroAchievementsSection({
   );
 }
 
+// Metadados + resumo histórico/lore do jogo, gerados por IA (funciona pra
+// qualquer plataforma, diferente da seção de RA). Busca uma vez só e guarda
+// em game.loreData — só refaz a chamada se o usuário clicar em "atualizar".
+// Ordem recomendada de jogo dentro de uma franquia, via IA (o RA tem um
+// recurso parecido no site — "Hubs" — mas não está exposto na API pública).
+// Cruza com os jogos da própria biblioteca que têm o mesmo texto em
+// "Franquia".
+function FranchiseOrderSection({ franchise, games }) {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const siblings = games.filter(
+    (g) => (g.franchise || "").trim().toLowerCase() === franchise.toLowerCase()
+  );
+
+  async function fetchOrder() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/franchise-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          franchise,
+          games: siblings.map((g) => ({ name: g.name, platformLabel: platformOf(g.platform).label })),
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      setResult(body);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (siblings.length < 2) {
+    return (
+      <p className="text-xs text-zinc-600 mb-5">
+        Adicione mais jogos com "{franchise}" no campo Franquia pra ver a ordem recomendada de jogo.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mb-5 bg-zinc-950 border border-zinc-800 rounded-lg p-3">
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <p className="text-xs text-zinc-400">
+          {siblings.length} jogos de "{franchise}" na sua biblioteca
+        </p>
+        <button
+          onClick={fetchOrder}
+          disabled={loading}
+          className="flex items-center gap-1.5 text-xs text-indigo-300 hover:text-indigo-200 disabled:opacity-40 transition-colors shrink-0"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Target className="w-3.5 h-3.5" />}
+          {result ? "atualizar ordem" : "ver ordem recomendada"}
+        </button>
+      </div>
+
+      {error && (
+        <p className="flex items-center gap-1.5 text-xs text-rose-400 mt-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {error}
+        </p>
+      )}
+
+      {result && (
+        <div className="mt-2 pt-2 border-t border-zinc-800">
+          {result.summary && <p className="text-xs text-zinc-500 mb-2">{result.summary}</p>}
+          <ol className="space-y-1.5">
+            {(result.order || []).map((item, i) => {
+              const match = siblings.find((g) => g.name === item.name);
+              return (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span className="shrink-0 w-4 h-4 rounded-full bg-zinc-800 text-zinc-400 flex items-center justify-center text-[10px] mt-0.5">
+                    {i + 1}
+                  </span>
+                  <span>
+                    <span className={match?.status === "completed" || isPlatinum(match || {}) ? "text-emerald-400" : "text-zinc-300"}>
+                      {item.name}
+                    </span>
+                    {item.reason && <span className="text-zinc-500"> — {item.reason}</span>}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameLoreSection({ game, onApplyLore }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const lore = game.loreData;
+
+  async function fetchLore() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/game-lore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: game.name, platformLabel: platformOf(game.platform).label }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      onApplyLore(body);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!game.loreData) fetchLore();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
+  // Metadados oficiais da RA (quando o jogo é vinculado) são mais confiáveis
+  // que os do Gemini — preferimos eles quando disponíveis.
+  const meta = {
+    developer: game.raMeta?.developer || lore?.developer,
+    publisher: game.raMeta?.publisher || lore?.publisher,
+    genre: game.raMeta?.genre || lore?.genre,
+    released: game.raMeta?.released || lore?.released,
+  };
+  const hasMeta = meta.developer || meta.publisher || meta.genre || meta.released;
+
+  return (
+    <div className="mb-5">
+      {hasMeta && (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500 mb-2">
+          {meta.developer && <span>Dev: <span className="text-zinc-400">{meta.developer}</span></span>}
+          {meta.publisher && <span>Publisher: <span className="text-zinc-400">{meta.publisher}</span></span>}
+          {meta.genre && <span>Gênero: <span className="text-zinc-400">{meta.genre}</span></span>}
+          {meta.released && <span>Lançamento: <span className="text-zinc-400">{meta.released}</span></span>}
+        </div>
+      )}
+
+      {loading && (
+        <p className="flex items-center gap-1.5 text-xs text-zinc-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> buscando contexto do jogo...
+        </p>
+      )}
+
+      {!loading && lore?.lore && (
+        <p className="text-sm text-zinc-400 leading-relaxed">{lore.lore}</p>
+      )}
+
+      {!loading && error && (
+        <p className="flex items-center gap-1.5 text-xs text-rose-400">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {error}
+          <button onClick={fetchLore} className="underline hover:text-rose-300">tentar de novo</button>
+        </p>
+      )}
+
+      {!loading && !error && lore && (
+        <button onClick={fetchLore} className="mt-1 text-xs text-zinc-600 hover:text-zinc-400 underline">
+          atualizar resumo
+        </button>
+      )}
+    </div>
+  );
+}
+
 function GameDetailModal({
-  game, analyzing, error, activeProfileId, activeProfileName, profiles,
+  game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus,
   onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onSaveTranslations, onApplyRaData,
   onRemove,
@@ -1359,9 +1703,9 @@ function GameDetailModal({
                   alt=""
                   className={`w-7 h-7 rounded shrink-0 ${
                     isPlatinum(game)
-                      ? "ring-2 ring-amber-400"
+                      ? "ring-2 ring-indigo-400"
                       : game.status === "completed"
-                      ? "ring-2 ring-emerald-500"
+                      ? "ring-2 ring-amber-400"
                       : ""
                   }`}
                 />
@@ -1383,6 +1727,10 @@ function GameDetailModal({
           </div>
           <p className="text-xs text-zinc-500 mb-4">adicionado em {formatDate(game.createdAt)}</p>
 
+          {/* metadados + lore/história do jogo (gerado por IA, funciona pra
+              qualquer plataforma) — fica antes dos status, como pedido */}
+          <GameLoreSection game={game} onApplyLore={(patch) => onApplyRaData({ loreData: patch })} />
+
           {/* status: quero jogar / jogando / zerado / abandonado */}
           <div className="flex flex-wrap gap-1.5 mb-6">
             {STATUSES.map((s) => (
@@ -1398,13 +1746,16 @@ function GameDetailModal({
             ))}
           </div>
 
-          {/* conquistas via RetroAchievements */}
-          <RetroAchievementsSection
-            game={game}
-            onUpdateRaGameId={onUpdateRaGameId}
-            onSaveTranslations={onSaveTranslations}
-            onApplyRaData={onApplyRaData}
-          />
+          {/* conquistas via RetroAchievements — só faz sentido pra jogos
+              retrô/ISO rodando via emulador, que é o que a RA cobre */}
+          {game.platform === "retro" && (
+            <RetroAchievementsSection
+              game={game}
+              onUpdateRaGameId={onUpdateRaGameId}
+              onSaveTranslations={onSaveTranslations}
+              onApplyRaData={onApplyRaData}
+            />
+          )}
 
           {/* rodando via: emulador ou executável */}
           <div className="mb-5">
@@ -1447,6 +1798,10 @@ function GameDetailModal({
               útil pra maratonar uma série e ver de cara quais já estão zerados.
             </p>
           </div>
+
+          {franchiseText.trim() && (
+            <FranchiseOrderSection franchise={franchiseText.trim()} games={games} />
+          )}
 
           {/* objetivos */}
           <div className="mb-5">

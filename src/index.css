@@ -1,3 +1,10 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* moldura "galáxia" (zerado/platinado) — brilho aleatório e independente
+   por estrela, sem nenhum movimento circular/uniforme */
+@keyframes chub-twinkle {
+  0%, 100% { opacity: 0.15; transform: scale(0.55); }
+  50% { opacity: 1; transform: scale(1); }
+}

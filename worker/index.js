@@ -128,6 +128,261 @@ Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
   return json({ text, usedGrounding, fellBackFromQuota });
 }
 
+// Resumo/lore + metadados básicos de UM jogo, gerado por IA (mesmo padrão de
+// busca+fallback do handleAnalyze). Serve pra QUALQUER jogo, de qualquer
+// plataforma — diferente do RetroAchievements, que só cobre jogos com
+// conquistas cadastradas lá.
+async function handleGameLore(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "Corpo da requisição inválido." }, 400);
+  }
+
+  const { name, platformLabel } = payload || {};
+  if (!name) return json({ error: "Falta o nome do jogo." }, 400);
+
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return json({ error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." }, 500);
+  }
+
+  const model = env.GEMINI_MODEL || "gemini-3-flash";
+
+  const systemInstruction = `Você é um historiador especialista na indústria de videogames, com foco em curiosidades e contexto histórico de jogos (retrô ou modernos).
+
+Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, sem crases, no formato exato:
+{
+  "developer": "estúdio desenvolvedor ou null se não souber",
+  "publisher": "publicadora ou null se não souber",
+  "genre": "gênero curto ou null",
+  "released": "ano de lançamento (ou data) ou null",
+  "lore": "2 a 4 frases em português, cobrindo contexto/lore do jogo e 1-2 feitos ou curiosidades marcantes dele na indústria (recepção histórica, inovação técnica, influência em outros jogos, polêmicas, recordes etc). Direto ao ponto, sem enrolação."
+}`;
+
+  const userPrompt = `Jogo: ${name}
+Plataforma/loja: ${platformLabel || "não informado"}`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  async function callGemini(useGrounding) {
+    const body = {
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      generationConfig: { temperature: 0.5 },
+    };
+    if (useGrounding) body.tools = [{ google_search: {} }];
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  let geminiResponse;
+  try {
+    geminiResponse = await callGemini(true);
+    if (geminiResponse.status === 429) {
+      geminiResponse = await callGemini(false);
+    }
+  } catch (e) {
+    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
+  }
+
+  if (!geminiResponse.ok) {
+    const errText = await geminiResponse.text().catch(() => "");
+    return json({ error: `Gemini retornou erro ${geminiResponse.status}: ${errText.slice(0, 300)}` }, 502);
+  }
+
+  const data = await geminiResponse.json();
+  const candidate = (data.candidates || [])[0];
+  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  if (!text) return json({ error: "O Gemini não retornou texto na resposta." }, 502);
+
+  const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return json({ error: "Não foi possível interpretar a resposta do Gemini como JSON." }, 502);
+  }
+
+  return json(parsed);
+}
+
+// Ordem de jogo recomendada dentro de uma franquia (mesmo padrão de IA com
+// busca) — substitui a ideia dos "Hubs" do RA, que não é exposta pela API
+// pública deles hoje.
+async function handleFranchiseOrder(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "Corpo da requisição inválido." }, 400);
+  }
+
+  const { franchise, games } = payload || {};
+  if (!franchise || !Array.isArray(games) || games.length === 0) {
+    return json({ error: "Faltam a franquia ou a lista de jogos." }, 400);
+  }
+
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return json({ error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." }, 500);
+  }
+
+  const model = env.GEMINI_MODEL || "gemini-3-flash";
+  const gamesList = games.map((g) => `- ${g.name} (${g.platformLabel || "plataforma não informada"})`).join("\n");
+
+  const systemInstruction = `Você é um especialista em franquias de videogame. O usuário tem estes jogos da franquia "${franchise}" na biblioteca dele:
+${gamesList}
+
+Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, sem crases, no formato exato:
+{
+  "summary": "1-2 frases sobre a franquia em geral",
+  "order": [
+    { "name": "nome exato do jogo como veio na lista", "reason": "1 frase curta do porquê dessa posição (cronologia da história, não de lançamento, a menos que sejam a mesma coisa)" }
+  ]
+}
+A lista "order" deve conter TODOS os jogos da lista acima, na ordem recomendada de jogar pra melhor entender a história/lore da franquia (não necessariamente a ordem de lançamento).`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  async function callGemini(useGrounding) {
+    const body = {
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: "user", parts: [{ text: `Franquia: ${franchise}` }] }],
+      generationConfig: { temperature: 0.4 },
+    };
+    if (useGrounding) body.tools = [{ google_search: {} }];
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  let geminiResponse;
+  try {
+    geminiResponse = await callGemini(true);
+    if (geminiResponse.status === 429) {
+      geminiResponse = await callGemini(false);
+    }
+  } catch (e) {
+    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
+  }
+
+  if (!geminiResponse.ok) {
+    const errText = await geminiResponse.text().catch(() => "");
+    return json({ error: `Gemini retornou erro ${geminiResponse.status}: ${errText.slice(0, 300)}` }, 502);
+  }
+
+  const data = await geminiResponse.json();
+  const candidate = (data.candidates || [])[0];
+  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  if (!text) return json({ error: "O Gemini não retornou texto na resposta." }, 502);
+
+  const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return json({ error: "Não foi possível interpretar a resposta do Gemini como JSON." }, 502);
+  }
+
+  return json(parsed);
+}
+
+// Capa via SteamGridDB — pra jogos de lojas sem API pública decente
+// (GOG/Epic/Amazon). Busca por NOME (essas lojas não têm um "ID" universal
+// consultável), pega o primeiro resultado com imagem disponível.
+async function handleCoverArt(request, env) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get("name");
+  if (!name) return json({ error: "Falta o parâmetro name." }, 400);
+
+  const apiKey = env.STEAMGRIDDB_API_KEY;
+  if (!apiKey) return json({ error: "STEAMGRIDDB_API_KEY não configurada no servidor." }, 500);
+
+  const headers = { Authorization: `Bearer ${apiKey}` };
+
+  let searchRes;
+  try {
+    searchRes = await fetch(
+      `https://www.steamgriddb.com/api/v2/search/autocomplete/${encodeURIComponent(name)}`,
+      { headers }
+    );
+  } catch (e) {
+    return json({ error: `Falha ao contatar o SteamGridDB: ${e.message}` }, 502);
+  }
+  if (!searchRes.ok) return json({ error: `SteamGridDB retornou erro ${searchRes.status} na busca.` }, 502);
+  const searchData = await searchRes.json().catch(() => null);
+  const match = searchData?.data?.[0];
+  if (!match) return json({ error: "Nenhum jogo encontrado no SteamGridDB com esse nome." }, 404);
+
+  let gridRes;
+  try {
+    gridRes = await fetch(
+      `https://www.steamgriddb.com/api/v2/grids/game/${match.id}?dimensions=460x215,920x430`,
+      { headers }
+    );
+  } catch (e) {
+    return json({ error: `Falha ao contatar o SteamGridDB: ${e.message}` }, 502);
+  }
+  if (!gridRes.ok) return json({ error: `SteamGridDB retornou erro ${gridRes.status} nas capas.` }, 502);
+  const gridData = await gridRes.json().catch(() => null);
+  let grid = gridData?.data?.[0];
+
+  // Sem resultado no formato "landscape" preferido — tenta qualquer formato.
+  if (!grid) {
+    try {
+      const fallbackRes = await fetch(`https://www.steamgriddb.com/api/v2/grids/game/${match.id}`, { headers });
+      if (fallbackRes.ok) {
+        const fallbackData = await fallbackRes.json().catch(() => null);
+        grid = fallbackData?.data?.[0];
+      }
+    } catch {
+      // ignora — cai no erro abaixo
+    }
+  }
+
+  if (!grid) return json({ error: "O jogo foi encontrado, mas não tem capas disponíveis no SteamGridDB." }, 404);
+
+  return json({ coverUrl: grid.url, matchedName: match.name });
+}
+
+// Avatar + pontos/rank da conta do RA — usado SÓ no painel de escolha de
+// perfil de hardware, pro perfil marcado como vinculado ao RA (ver raLinked).
+async function handleRetroAchievementsProfile(request, env) {
+  const apiKey = env.RA_API_KEY;
+  const username = env.RA_USERNAME;
+  if (!apiKey || !username) return json({ error: "RA não configurado no servidor." }, 500);
+
+  const raUrl = `https://retroachievements.org/API/API_GetUserSummary.php?u=${encodeURIComponent(
+    username
+  )}&y=${encodeURIComponent(apiKey)}`;
+
+  let raResponse;
+  try {
+    raResponse = await fetch(raUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+  if (!raResponse.ok) return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
+  const data = await raResponse.json().catch(() => null);
+  if (!data) return json({ error: "Não foi possível interpretar a resposta do RetroAchievements." }, 502);
+
+  return json({
+    username: data.User || username,
+    avatarUrl: data.UserPic ? `https://media.retroachievements.org${data.UserPic}` : null,
+    rank: data.Rank ?? null,
+    points: data.TotalPoints ?? 0,
+    truePoints: data.TotalTruePoints ?? 0,
+    memberSince: data.MemberSince || null,
+  });
+}
+
 async function handleRetroAchievements(request, env) {
   const url = new URL(request.url);
   const gameId = url.searchParams.get("gameId");
@@ -318,35 +573,6 @@ async function handleRetroAchievementsWeek(request, env) {
   });
 }
 
-// Resumo simples da conta do RA (pontos) — usado como contexto no topo do
-// app. É uma conta única (o RA não distingue "qual PC" jogou), então isso
-// não é filtrado por perfil de hardware — ver observação na conversa.
-async function handleRetroAchievementsSummary(request, env) {
-  const apiKey = env.RA_API_KEY;
-  const username = env.RA_USERNAME;
-  if (!apiKey || !username) return json({ error: "RA não configurado no servidor." }, 500);
-
-  const raUrl = `https://retroachievements.org/API/API_GetUserPoints.php?u=${encodeURIComponent(
-    username
-  )}&y=${encodeURIComponent(apiKey)}`;
-
-  let raResponse;
-  try {
-    raResponse = await fetch(raUrl);
-  } catch (e) {
-    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
-  }
-  if (!raResponse.ok) return json({ error: `RetroAchievements retornou erro ${raResponse.status}.` }, 502);
-  const data = await raResponse.json().catch(() => null);
-  if (!data) return json({ error: "Não foi possível interpretar a resposta do RetroAchievements." }, 502);
-
-  return json({
-    username,
-    points: data.Points ?? 0,
-    softcorePoints: data.SoftcorePoints ?? 0,
-  });
-}
-
 async function handleTranslateAchievements(request, env) {
   let payload;
   try {
@@ -467,12 +693,42 @@ export default {
       return json({ error: "Método não permitido." }, 405);
     }
 
-    if (url.pathname === "/api/retroachievements/summary") {
+    if (url.pathname === "/api/retroachievements/profile") {
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
       if (request.method === "GET") {
-        return handleRetroAchievementsSummary(request, env);
+        return handleRetroAchievementsProfile(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/game-lore") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "POST") {
+        return handleGameLore(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/franchise-order") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "POST") {
+        return handleFranchiseOrder(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/coverart") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleCoverArt(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
