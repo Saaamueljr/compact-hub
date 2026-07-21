@@ -57,13 +57,21 @@ Considere sempre:
 
 Responda SOMENTE com um JSON válido, sem nenhum texto antes ou depois, sem markdown, sem crases, no formato exato:
 {
-  "tier": <1 a 5, sendo 5 excelente e 1 não roda>,
-  "tierLabel": "Excelente|Bom|OK|Ruim|Não roda",
+  "tier": <1 a 6, sendo 6 excelente e 1 não roda>,
+  "tierLabel": "Excelente|Bom|OK|Jogável|Ruim|Não roda",
   "veredito": "uma frase direta",
   "motivo": "2 a 3 frases explicando o porquê, citando CPU/GPU/VRAM quando relevante",
   "configuracaoRecomendada": "sugestão curta de configuração gráfica",
   "avisos": ["aviso curto, se houver"]
-}`;
+}
+
+Escala de tier:
+6 = Excelente (roda liso, configuração alta)
+5 = Bom (roda bem, configuração média/alta)
+4 = OK (roda de forma estável, configuração média/baixa, sem grandes ressalvas)
+3 = Jogável (roda, mas capenga — quedas de fps frequentes, precisa abrir mão de bastante coisa, ou só funciona com ajustes/patches não oficiais)
+2 = Ruim (abre e roda, mas a experiência é ruim a ponto de não valer a pena — travamentos constantes, fps muito baixo)
+1 = Não roda (trava na tela de carregamento, crash constante, ou requisito mínimo que a configuração simplesmente não atende)`;
 
   const userPrompt = `Jogo: ${game.name}
 Plataforma: ${platformLabel || "não informado"}

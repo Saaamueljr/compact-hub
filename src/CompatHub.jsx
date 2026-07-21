@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, Award, Bell, Clock, Info
+  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -17,12 +17,31 @@ const PLATFORMS = [
 ];
 
 const TIER_META = {
-  5: { label: "Excelente", dot: "bg-emerald-500", text: "text-emerald-300", border: "border-emerald-600" },
-  4: { label: "Bom", dot: "bg-sky-500", text: "text-sky-300", border: "border-sky-600" },
-  3: { label: "OK", dot: "bg-amber-500", text: "text-amber-300", border: "border-amber-600" },
+  6: { label: "Excelente", dot: "bg-emerald-500", text: "text-emerald-300", border: "border-emerald-600" },
+  5: { label: "Bom", dot: "bg-sky-500", text: "text-sky-300", border: "border-sky-600" },
+  4: { label: "OK", dot: "bg-teal-500", text: "text-teal-300", border: "border-teal-600" },
+  3: { label: "Jogável", dot: "bg-amber-500", text: "text-amber-300", border: "border-amber-600" },
   2: { label: "Ruim", dot: "bg-orange-500", text: "text-orange-300", border: "border-orange-600" },
   1: { label: "Não roda", dot: "bg-red-500", text: "text-red-300", border: "border-red-600" },
 };
+
+// Corte mínimo pra um jogo ser considerado "compatível o suficiente" com um
+// hardware — usado pelo filtro "só jogos compatíveis" na tela inicial.
+const MIN_PLAYABLE_TIER = 3; // "Jogável"
+
+// Migração de escala: versões antigas iam de 1 a 5 (Não roda/Ruim/OK/Bom/
+// Excelente). Agora vai de 1 a 6, com "Jogável" inserido entre Ruim e OK —
+// então tudo que era 3/4/5 precisa subir um número; 1 e 2 não mudam.
+function migrateTierScale(games) {
+  return (games || []).map((g) => ({
+    ...g,
+    analyses: (g.analyses || []).map((a) => {
+      if (typeof a.tier !== "number" || a.tier < 3) return a;
+      const newTier = a.tier + 1;
+      return { ...a, tier: newTier, tierLabel: TIER_META[newTier]?.label || a.tierLabel };
+    }),
+  }));
+}
 
 const RUNNING_VIA_SUGGESTIONS = [
   "Executável nativo",
@@ -388,6 +407,7 @@ export default function CompatHub() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [onlyPlatinum, setOnlyPlatinum] = useState(false);
+  const [onlyCompatible, setOnlyCompatible] = useState(true);
   const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const [showAdd, setShowAdd] = useState(false);
@@ -428,7 +448,9 @@ export default function CompatHub() {
             setProfiles(migrated);
             setActiveProfileId(migrated[0].id);
           }
-          setGames(parsed.games || []);
+          const schemaVersion = parsed.tierSchemaVersion || 1;
+          const loadedGames = parsed.games || [];
+          setGames(schemaVersion < 2 ? migrateTierScale(loadedGames) : loadedGames);
           setFranchiseNotes(parsed.franchiseNotes || {});
         }
       } catch {
@@ -464,6 +486,7 @@ export default function CompatHub() {
           activeProfileId: nextActiveProfileId,
           games: nextGames,
           franchiseNotes: nextFranchiseNotes,
+          tierSchemaVersion: 2,
         })
       );
     } catch (e) {
@@ -599,7 +622,12 @@ export default function CompatHub() {
     const matchesFavorite = !onlyFavorites || g.favorite;
     const matchesPlatinum = !onlyPlatinum || isPlatinum(g);
     const matchesFranchise = franchiseFilter === "all" || g.franchise === franchiseFilter;
-    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise;
+    // jogo sem análise pra ESTE perfil continua aparecendo (senão não dá pra
+    // nem achar ele pra analisar) — só some quando já foi analisado e ficou
+    // abaixo do corte de "jogável" nesse hardware específico.
+    const latestForProfile = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
+    const matchesCompat = !onlyCompatible || !latestForProfile || latestForProfile.tier >= MIN_PLAYABLE_TIER;
+    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise && matchesCompat;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
@@ -613,15 +641,16 @@ export default function CompatHub() {
       const latest = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
       if (latest) {
         acc.analyzed += 1;
-        if (latest.tier === 5) acc.excellent += 1;
-        else if (latest.tier === 4) acc.good += 1;
-        else if (latest.tier === 3) acc.ok += 1;
+        if (latest.tier === 6) acc.excellent += 1;
+        else if (latest.tier === 5) acc.good += 1;
+        else if (latest.tier === 4) acc.ok += 1;
+        else if (latest.tier === 3) acc.playable += 1;
         else if (latest.tier === 2) acc.bad += 1;
         else if (latest.tier === 1) acc.incompatible += 1;
       }
       return acc;
     },
-    { total: 0, analyzed: 0, excellent: 0, good: 0, ok: 0, bad: 0, incompatible: 0 }
+    { total: 0, analyzed: 0, excellent: 0, good: 0, ok: 0, playable: 0, bad: 0, incompatible: 0 }
   );
 
   if (!loaded) {
@@ -718,8 +747,13 @@ export default function CompatHub() {
               </span>
             )}
             {stats.ok > 0 && (
-              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-amber-800 text-amber-300">
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-teal-800 text-teal-300">
                 <b>{stats.ok}</b> ok
+              </span>
+            )}
+            {stats.playable > 0 && (
+              <span className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-amber-800 text-amber-300">
+                <b>{stats.playable}</b> jogáveis
               </span>
             )}
             {stats.bad > 0 && (
@@ -805,6 +839,19 @@ export default function CompatHub() {
         >
           <Award className="w-4 h-4" />
           Platinados
+        </button>
+
+        <button
+          onClick={() => setOnlyCompatible(!onlyCompatible)}
+          title={`Esconde jogos já analisados abaixo de "${TIER_META[MIN_PLAYABLE_TIER].label}" no perfil ativo (${profile.name})`}
+          className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm border transition-colors ${
+            onlyCompatible
+              ? "bg-teal-900/40 border-teal-700 text-teal-300"
+              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Cpu className="w-4 h-4" />
+          Compatíveis com {profile.name}
         </button>
 
         <button
