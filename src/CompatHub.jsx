@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu
+  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -992,6 +992,7 @@ export default function CompatHub() {
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
           onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
           onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
+          onUpdateName={(name) => updateGame(activeGame.id, { name })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
           onApplyRaData={(patch) => updateGame(activeGame.id, patch)}
           franchiseNotes={franchiseNotes}
@@ -1948,7 +1949,7 @@ function GameLoreSection({ game, onApplyLore }) {
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
-  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onSaveTranslations, onApplyRaData,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onSaveTranslations, onApplyRaData,
   franchiseNotes, onUpdateFranchiseNotes,
   onRemove,
 }) {
@@ -1956,8 +1957,21 @@ function GameDetailModal({
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
   const [franchiseText, setFranchiseText] = useState(game.franchise || "");
+  const [editingName, setEditingName] = useState(false);
+  const [nameText, setNameText] = useState(game.name);
   const [fetchingCover, setFetchingCover] = useState(false);
   const [coverError, setCoverError] = useState("");
+
+  useEffect(() => {
+    setNameText(game.name);
+  }, [game.name]);
+
+  function saveName() {
+    const trimmed = nameText.trim();
+    if (trimmed && trimmed !== game.name) onUpdateName(trimmed);
+    else setNameText(game.name);
+    setEditingName(false);
+  }
 
   async function fetchCoverArt() {
     setFetchingCover(true);
@@ -1973,6 +1987,15 @@ function GameDetailModal({
       setFetchingCover(false);
     }
   }
+
+  // Qualquer jogo sem capa — de qualquer plataforma — busca sozinho no
+  // SteamGridDB assim que o card é aberto (o botão manual abaixo continua
+  // ali como retentativa, caso a busca automática não encontre nada).
+  useEffect(() => {
+    if (!game.coverUrl) fetchCoverArt();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
   useEffect(() => {
     setFranchiseText(game.franchise || "");
   }, [game.franchise]);
@@ -1992,7 +2015,7 @@ function GameDetailModal({
       <div>
         <div className="relative">
           <CoverThumb game={game} frame className="w-full aspect-video" />
-          {!game.coverUrl && game.platform !== "retro" && (
+          {!game.coverUrl && (
             <div className="absolute bottom-2 right-2 z-30">
               <button
                 onClick={fetchCoverArt}
@@ -2000,7 +2023,7 @@ function GameDetailModal({
                 className="flex items-center gap-1.5 text-xs bg-black/70 backdrop-blur text-indigo-300 hover:text-indigo-200 disabled:opacity-50 px-2.5 py-1.5 rounded-lg border border-zinc-700 transition-colors"
               >
                 {fetchingCover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                Buscar capa (SteamGridDB)
+                {fetchingCover ? "buscando capa..." : "buscar capa de novo (SteamGridDB)"}
               </button>
               {coverError && <p className="text-xs text-rose-400 mt-1 text-right max-w-[220px]">{coverError}</p>}
             </div>
@@ -2023,7 +2046,25 @@ function GameDetailModal({
                   }`}
                 />
               )}
-              <h2 className="text-lg font-semibold truncate">{game.name}</h2>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={nameText}
+                  onChange={(e) => setNameText(e.target.value)}
+                  onBlur={saveName}
+                  onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setNameText(game.name); setEditingName(false); } }}
+                  className="text-lg font-semibold bg-zinc-950 border border-indigo-600 rounded-md px-2 py-0.5 outline-none min-w-0 flex-1"
+                />
+              ) : (
+                <button
+                  onClick={() => setEditingName(true)}
+                  className="flex items-center gap-1.5 min-w-0 group/name text-left"
+                  title="Clique pra editar o nome"
+                >
+                  <h2 className="text-lg font-semibold truncate">{game.name}</h2>
+                  <Pencil className="w-3.5 h-3.5 text-zinc-600 group-hover/name:text-zinc-400 shrink-0 transition-colors" />
+                </button>
+              )}
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <button

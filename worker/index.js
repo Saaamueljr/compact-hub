@@ -341,7 +341,12 @@ async function handleCoverArt(request, env) {
   }
   if (!gridRes.ok) return json({ error: `SteamGridDB retornou erro ${gridRes.status} nas capas.` }, 502);
   const gridData = await gridRes.json().catch(() => null);
-  let grid = gridData?.data?.[0];
+  // O card do CompactHub é 16:9 (aspect-video) — o formato "horizontal" do
+  // SteamGridDB (460x215/920x430) é o mais próximo disso (a proporção exata
+  // 16:9 não existe nas opções deles). Entre os resultados, pega sempre o de
+  // MAIOR resolução disponível, pra ficar nítido tanto no grid quanto no
+  // card ampliado do modal — object-cover cuida do encaixe sem esticar.
+  let grid = pickLargestGrid(gridData?.data);
 
   // Sem resultado no formato "landscape" preferido — tenta qualquer formato.
   if (!grid) {
@@ -349,7 +354,7 @@ async function handleCoverArt(request, env) {
       const fallbackRes = await fetch(`https://www.steamgriddb.com/api/v2/grids/game/${match.id}`, { headers });
       if (fallbackRes.ok) {
         const fallbackData = await fallbackRes.json().catch(() => null);
-        grid = fallbackData?.data?.[0];
+        grid = pickLargestGrid(fallbackData?.data);
       }
     } catch {
       // ignora — cai no erro abaixo
@@ -359,6 +364,11 @@ async function handleCoverArt(request, env) {
   if (!grid) return json({ error: "O jogo foi encontrado, mas não tem capas disponíveis no SteamGridDB." }, 404);
 
   return json({ coverUrl: grid.url, matchedName: match.name });
+}
+
+function pickLargestGrid(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return [...list].sort((a, b) => (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0))[0];
 }
 
 // Avatar + pontos/rank da conta do RA — usado SÓ no painel de escolha de
