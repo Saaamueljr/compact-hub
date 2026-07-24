@@ -993,6 +993,7 @@ export default function CompatHub() {
           onUpdateRunningVia={(runningVia) => updateGame(activeGame.id, { runningVia })}
           onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
           onUpdateName={(name) => updateGame(activeGame.id, { name })}
+          onUpdatePlatform={(platform) => updateGame(activeGame.id, { platform })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
           onApplyRaData={(patch) => updateGame(activeGame.id, patch)}
           franchiseNotes={franchiseNotes}
@@ -1949,7 +1950,7 @@ function GameLoreSection({ game, onApplyLore }) {
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
-  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onSaveTranslations, onApplyRaData,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onUpdatePlatform, onSaveTranslations, onApplyRaData,
   franchiseNotes, onUpdateFranchiseNotes,
   onRemove,
 }) {
@@ -1961,6 +1962,18 @@ function GameDetailModal({
   const [nameText, setNameText] = useState(game.name);
   const [fetchingCover, setFetchingCover] = useState(false);
   const [coverError, setCoverError] = useState("");
+  const [editingCover, setEditingCover] = useState(false);
+  const [coverUrlInput, setCoverUrlInput] = useState(game.coverUrl || "");
+
+  useEffect(() => {
+    setCoverUrlInput(game.coverUrl || "");
+  }, [game.coverUrl]);
+
+  function saveCoverUrl() {
+    const trimmed = coverUrlInput.trim();
+    if (trimmed) onApplyRaData({ coverUrl: trimmed });
+    setEditingCover(false);
+  }
 
   useEffect(() => {
     setNameText(game.name);
@@ -2015,19 +2028,41 @@ function GameDetailModal({
       <div>
         <div className="relative">
           <CoverThumb game={game} frame className="w-full aspect-video" />
-          {!game.coverUrl && (
-            <div className="absolute bottom-2 right-2 z-30">
-              <button
-                onClick={fetchCoverArt}
-                disabled={fetchingCover}
-                className="flex items-center gap-1.5 text-xs bg-black/70 backdrop-blur text-indigo-300 hover:text-indigo-200 disabled:opacity-50 px-2.5 py-1.5 rounded-lg border border-zinc-700 transition-colors"
-              >
-                {fetchingCover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                {fetchingCover ? "buscando capa..." : "buscar capa de novo (SteamGridDB)"}
-              </button>
-              {coverError && <p className="text-xs text-rose-400 mt-1 text-right max-w-[220px]">{coverError}</p>}
-            </div>
-          )}
+          <div className="absolute bottom-2 right-2 z-30 flex flex-col items-end gap-1.5">
+            {editingCover ? (
+              <div className="flex items-center gap-1.5 bg-black/80 backdrop-blur p-1.5 rounded-lg border border-zinc-700">
+                <input
+                  autoFocus
+                  value={coverUrlInput}
+                  onChange={(e) => setCoverUrlInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveCoverUrl(); if (e.key === "Escape") setEditingCover(false); }}
+                  placeholder="URL da capa"
+                  className="w-48 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs outline-none focus:border-indigo-600"
+                />
+                <button onClick={saveCoverUrl} className="text-xs text-emerald-400 hover:text-emerald-300 px-1.5">salvar</button>
+                <button onClick={() => setEditingCover(false)} className="text-xs text-zinc-500 hover:text-zinc-300 px-1">✕</button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setEditingCover(true)}
+                  className="flex items-center gap-1.5 text-xs bg-black/70 backdrop-blur text-zinc-300 hover:text-zinc-100 px-2.5 py-1.5 rounded-lg border border-zinc-700 transition-colors"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  URL manual
+                </button>
+                <button
+                  onClick={fetchCoverArt}
+                  disabled={fetchingCover}
+                  className="flex items-center gap-1.5 text-xs bg-black/70 backdrop-blur text-indigo-300 hover:text-indigo-200 disabled:opacity-50 px-2.5 py-1.5 rounded-lg border border-zinc-700 transition-colors"
+                >
+                  {fetchingCover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  {fetchingCover ? "buscando..." : game.coverUrl ? "trocar capa (SteamGridDB)" : "buscar capa (SteamGridDB)"}
+                </button>
+              </div>
+            )}
+            {coverError && <p className="text-xs text-rose-400 text-right max-w-[260px]">{coverError}</p>}
+          </div>
         </div>
         <div className="relative overflow-hidden p-6">
           {frameVariantOf(game) && <StarField variant={frameVariantOf(game)} seed={game.id} count={40} />}
@@ -2074,9 +2109,18 @@ function GameDetailModal({
               >
                 <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-400"}`} />
               </button>
-              <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-                {platformOf(game.platform).label}
-              </span>
+              <select
+                value={game.platform}
+                onChange={(e) => onUpdatePlatform(e.target.value)}
+                className={`text-xs px-2 py-0.5 rounded-full outline-none cursor-pointer appearance-none text-center ${platformOf(game.platform).badge}`}
+                title="Clique pra mudar a plataforma"
+              >
+                {PLATFORMS.map((p) => (
+                  <option key={p.id} value={p.id} className="bg-zinc-900 text-zinc-200">
+                    {p.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
           <p className="text-xs text-zinc-500 mb-4">adicionado em {formatDate(game.createdAt)}</p>
