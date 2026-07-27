@@ -16,6 +16,119 @@ function json(body, status = 200) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Modelo padrão e um modelo de reserva pra quando o padrão está sobrecarregado
+// (erro 503) — ajustável via env.GEMINI_MODEL / env.GEMINI_FALLBACK_MODEL se
+// algum deles for descontinuado no futuro.
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+const FALLBACK_GEMINI_MODEL = "gemini-2.5-flash";
+
+// Chamada única ao Gemini, com toda a lógica de resiliência num lugar só:
+// - 429 (cota de busca excedida) -> tenta de novo sem grounding
+// - 503/500 (sobrecarga momentânea) -> até 2 retentativas com backoff curto
+// - 503 persistente -> troca pro modelo de reserva antes de desistir
+// - extrai e faz parse do JSON da resposta (objeto ou array)
+async function callGeminiJSON(env, { systemInstruction, userPrompt, temperature = 0.4, allowGrounding = true }) {
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { ok: false, status: 500, error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." };
+  }
+
+  const primaryModel = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const fallbackModel = env.GEMINI_FALLBACK_MODEL || FALLBACK_GEMINI_MODEL;
+
+  function buildUrl(model) {
+    return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  }
+
+  async function attempt(model, useGrounding) {
+    const body = {
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      generationConfig: { temperature },
+    };
+    if (useGrounding) body.tools = [{ google_search: {} }];
+    return fetch(buildUrl(model), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  let response;
+  let usedGrounding = allowGrounding;
+  let usedModel = primaryModel;
+  let fellBackFromQuota = false;
+  let fellBackFromOverload = false;
+
+  try {
+    response = await attempt(primaryModel, allowGrounding);
+
+    // Cota de busca excedida — tenta de novo sem grounding, mesmo modelo.
+    if (response.status === 429 && allowGrounding) {
+      usedGrounding = false;
+      fellBackFromQuota = true;
+      response = await attempt(primaryModel, false);
+    }
+
+    // Sobrecarga momentânea (503) ou erro transiente (500) — algumas
+    // retentativas rápidas com backoff antes de trocar de modelo.
+    let retries = 0;
+    const delays = [400, 1000];
+    while ((response.status === 503 || response.status === 500) && retries < delays.length) {
+      await sleep(delays[retries]);
+      response = await attempt(primaryModel, usedGrounding);
+      retries += 1;
+    }
+
+    // Ainda sobrecarregado depois das retentativas — troca pro modelo de
+    // reserva antes de desistir de vez.
+    if (response.status === 503 && fallbackModel && fallbackModel !== primaryModel) {
+      fellBackFromOverload = true;
+      usedModel = fallbackModel;
+      response = await attempt(fallbackModel, usedGrounding);
+    }
+  } catch (e) {
+    return { ok: false, status: 502, error: `Falha ao contatar o Gemini: ${e.message}` };
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    const friendly =
+      response.status === 503
+        ? "O Gemini está sobrecarregado no momento (erro 503 do lado da Google). Tente de novo em alguns minutos."
+        : `Gemini retornou erro ${response.status}: ${errText.slice(0, 300)}`;
+    return { ok: false, status: 502, error: friendly };
+  }
+
+  const data = await response.json();
+  const candidate = (data.candidates || [])[0];
+  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  if (!text) return { ok: false, status: 502, error: "O Gemini não retornou texto na resposta." };
+
+  const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/[[{][\s\S]*[\]}]/);
+    if (match) {
+      try {
+        parsed = JSON.parse(match[0]);
+      } catch {
+        return { ok: false, status: 502, error: "Não foi possível interpretar a resposta do Gemini como JSON." };
+      }
+    } else {
+      return { ok: false, status: 502, error: "Não foi possível interpretar a resposta do Gemini como JSON." };
+    }
+  }
+
+  return { ok: true, data: parsed, usedGrounding, fellBackFromQuota, fellBackFromOverload, usedModel };
+}
+
 async function handleAnalyze(request, env) {
   let payload;
   try {
@@ -28,15 +141,6 @@ async function handleAnalyze(request, env) {
   if (!profile || !game || !game.name) {
     return json({ error: "Faltam dados do jogo ou do perfil de hardware." }, 400);
   }
-
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return json({ error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." }, 500);
-  }
-
-  // gemini-3-flash / gemini-3-flash-lite: modelos com tier gratuito com busca.
-  // Ajuste via variável de ambiente GEMINI_MODEL se um deles for descontinuado.
-  const model = env.GEMINI_MODEL || "gemini-3-flash";
 
   const systemInstruction = `Você é um analisador técnico de compatibilidade de jogos de PC. Avalie se o jogo informado roda bem nesta configuração:
 
@@ -79,61 +183,15 @@ Rodando via (emulador/executável especificado pelo usuário): ${game.runningVia
 Histórico de problemas registrados para este jogo: ${notesText || "nenhum registrado ainda"}
 Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const result = await callGeminiJSON(env, { systemInstruction, userPrompt, temperature: 0.4 });
+  if (!result.ok) return json({ error: result.error }, result.status);
 
-  // Tenta primeiro com busca (grounding) pra ter dados atualizados sobre o jogo.
-  // A cota de grounding é bem mais restrita que a de geração de texto normal,
-  // então se vier 429 (cota excedida), tenta de novo sem a busca — o modelo
-  // ainda responde bem usando só o que já sabe, especialmente pra jogos antigos.
-  async function callGemini(useGrounding) {
-    const body = {
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature: 0.4 },
-    };
-    if (useGrounding) {
-      body.tools = [{ google_search: {} }];
-    }
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  let geminiResponse;
-  let usedGrounding = true;
-  let fellBackFromQuota = false;
-  try {
-    geminiResponse = await callGemini(true);
-
-    if (geminiResponse.status === 429) {
-      // Cota de busca provavelmente excedida — tenta de novo sem grounding.
-      usedGrounding = false;
-      fellBackFromQuota = true;
-      geminiResponse = await callGemini(false);
-    }
-  } catch (e) {
-    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
-  }
-
-  if (!geminiResponse.ok) {
-    const errText = await geminiResponse.text().catch(() => "");
-    return json({ error: `Gemini retornou erro ${geminiResponse.status}: ${errText.slice(0, 300)}` }, 502);
-  }
-
-  const data = await geminiResponse.json();
-  const candidate = (data.candidates || [])[0];
-  const text = (candidate?.content?.parts || [])
-    .map((p) => p.text || "")
-    .join("\n")
-    .trim();
-
-  if (!text) {
-    return json({ error: "O Gemini não retornou texto na resposta." }, 502);
-  }
-
-  return json({ text, usedGrounding, fellBackFromQuota });
+  return json({
+    ...result.data,
+    usedGrounding: result.usedGrounding,
+    fellBackFromQuota: result.fellBackFromQuota,
+    fellBackFromOverload: result.fellBackFromOverload,
+  });
 }
 
 // Resumo/lore + metadados básicos de UM jogo, gerado por IA (mesmo padrão de
@@ -151,13 +209,6 @@ async function handleGameLore(request, env) {
   const { name, platformLabel } = payload || {};
   if (!name) return json({ error: "Falta o nome do jogo." }, 400);
 
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return json({ error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." }, 500);
-  }
-
-  const model = env.GEMINI_MODEL || "gemini-3-flash";
-
   const systemInstruction = `Você é um historiador especialista na indústria de videogames, com foco em curiosidades e contexto histórico de jogos (retrô ou modernos).
 
 Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, sem crases, no formato exato:
@@ -173,51 +224,9 @@ Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, s
   const userPrompt = `Jogo: ${name}
 Plataforma/loja: ${platformLabel || "não informado"}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  async function callGemini(useGrounding) {
-    const body = {
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature: 0.5 },
-    };
-    if (useGrounding) body.tools = [{ google_search: {} }];
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  let geminiResponse;
-  try {
-    geminiResponse = await callGemini(true);
-    if (geminiResponse.status === 429) {
-      geminiResponse = await callGemini(false);
-    }
-  } catch (e) {
-    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
-  }
-
-  if (!geminiResponse.ok) {
-    const errText = await geminiResponse.text().catch(() => "");
-    return json({ error: `Gemini retornou erro ${geminiResponse.status}: ${errText.slice(0, 300)}` }, 502);
-  }
-
-  const data = await geminiResponse.json();
-  const candidate = (data.candidates || [])[0];
-  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
-  if (!text) return json({ error: "O Gemini não retornou texto na resposta." }, 502);
-
-  const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return json({ error: "Não foi possível interpretar a resposta do Gemini como JSON." }, 502);
-  }
-
-  return json(parsed);
+  const result = await callGeminiJSON(env, { systemInstruction, userPrompt, temperature: 0.5 });
+  if (!result.ok) return json({ error: result.error }, result.status);
+  return json(result.data);
 }
 
 // Ordem de jogo recomendada dentro de uma franquia (mesmo padrão de IA com
@@ -236,12 +245,6 @@ async function handleFranchiseOrder(request, env) {
     return json({ error: "Faltam a franquia ou a lista de jogos." }, 400);
   }
 
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return json({ error: "GEMINI_API_KEY não configurada no servidor (Settings > Variables and Secrets)." }, 500);
-  }
-
-  const model = env.GEMINI_MODEL || "gemini-3-flash";
   const gamesList = games.map((g) => `- ${g.name} (${g.platformLabel || "plataforma não informada"})`).join("\n");
 
   const systemInstruction = `Você é um especialista em franquias de videogame. O usuário tem estes jogos da franquia "${franchise}" na biblioteca dele:
@@ -256,51 +259,13 @@ Responda SOMENTE com um JSON válido, sem texto antes ou depois, sem markdown, s
 }
 A lista "order" deve conter TODOS os jogos da lista acima, na ordem recomendada de jogar pra melhor entender a história/lore da franquia (não necessariamente a ordem de lançamento).`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  async function callGemini(useGrounding) {
-    const body = {
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: "user", parts: [{ text: `Franquia: ${franchise}` }] }],
-      generationConfig: { temperature: 0.4 },
-    };
-    if (useGrounding) body.tools = [{ google_search: {} }];
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  let geminiResponse;
-  try {
-    geminiResponse = await callGemini(true);
-    if (geminiResponse.status === 429) {
-      geminiResponse = await callGemini(false);
-    }
-  } catch (e) {
-    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
-  }
-
-  if (!geminiResponse.ok) {
-    const errText = await geminiResponse.text().catch(() => "");
-    return json({ error: `Gemini retornou erro ${geminiResponse.status}: ${errText.slice(0, 300)}` }, 502);
-  }
-
-  const data = await geminiResponse.json();
-  const candidate = (data.candidates || [])[0];
-  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
-  if (!text) return json({ error: "O Gemini não retornou texto na resposta." }, 502);
-
-  const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return json({ error: "Não foi possível interpretar a resposta do Gemini como JSON." }, 502);
-  }
-
-  return json(parsed);
+  const result = await callGeminiJSON(env, {
+    systemInstruction,
+    userPrompt: `Franquia: ${franchise}`,
+    temperature: 0.4,
+  });
+  if (!result.ok) return json({ error: result.error }, result.status);
+  return json(result.data);
 }
 
 // Capa via SteamGridDB — pra jogos de lojas sem API pública decente
@@ -650,12 +615,6 @@ async function handleTranslateAchievements(request, env) {
     return json({ error: "Nenhuma conquista pra traduzir." }, 400);
   }
 
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return json({ error: "GEMINI_API_KEY não configurada no servidor." }, 500);
-  }
-  const model = env.GEMINI_MODEL || "gemini-3-flash";
-
   // Manda id + título + descrição em lote, pede de volta um JSON na mesma
   // ordem/ids — assim traduz tudo numa chamada só em vez de uma por conquista.
   const listForPrompt = achievements.map((a) => ({ id: a.id, title: a.title, description: a.description }));
@@ -665,52 +624,14 @@ Mantenha nomes próprios, referências e trocadilhos do jogo o quanto for possí
 Responda SOMENTE com um JSON válido (array), sem texto antes ou depois, sem markdown, no formato exato:
 [{ "id": <mesmo id recebido>, "title": "título traduzido", "description": "descrição traduzida" }]`;
 
-  const userPrompt = JSON.stringify(listForPrompt);
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: { temperature: 0.2 },
-      }),
-    });
-  } catch (e) {
-    return json({ error: `Falha ao contatar o Gemini: ${e.message}` }, 502);
-  }
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => "");
-    return json({ error: `Gemini retornou erro ${response.status}: ${errText.slice(0, 300)}` }, 502);
-  }
-
-  const data = await response.json();
-  const candidate = (data.candidates || [])[0];
-  const text = (candidate?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
-  const cleaned = text.replace(/```json|```/g, "").trim();
-
-  let translations;
-  try {
-    translations = JSON.parse(cleaned);
-  } catch {
-    const match = cleaned.match(/\[[\s\S]*\]/);
-    if (match) {
-      try {
-        translations = JSON.parse(match[0]);
-      } catch {
-        return json({ error: "Não consegui interpretar a tradução retornada." }, 502);
-      }
-    } else {
-      return json({ error: "Não consegui interpretar a tradução retornada." }, 502);
-    }
-  }
-
-  return json({ translations });
+  const result = await callGeminiJSON(env, {
+    systemInstruction,
+    userPrompt: JSON.stringify(listForPrompt),
+    temperature: 0.2,
+    allowGrounding: false, // tradução não precisa de busca
+  });
+  if (!result.ok) return json({ error: result.error }, result.status);
+  return json({ translations: result.data });
 }
 
 export default {

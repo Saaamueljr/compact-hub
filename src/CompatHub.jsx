@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil
+  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -101,6 +101,7 @@ function makeProfile(name, overrides = {}) {
     os: "",
     preferences: "",
     raLinked: false,
+    emulators: [],
     ...overrides,
   };
 }
@@ -116,6 +117,7 @@ const DEFAULT_PROFILES = [
     preferences:
       "Prefiro estabilidade a gráficos altos. Aceito baixar resolução/textura antes de travar fps. Não me importo de aplicar patches da comunidade quando necessário.",
     raLinked: false,
+    emulators: [],
   },
 ];
 
@@ -378,6 +380,141 @@ function CoverThumb({ game, className, frame = false }) {
   );
 }
 
+// Colunas ordenáveis pela visualização em lista.
+const LIST_COLUMNS = [
+  { key: "name", label: "Título" },
+  { key: "platform", label: "Plataforma" },
+  { key: "achievements", label: "Conquistas" },
+  { key: "released", label: "Lançamento" },
+  { key: "progress", label: "Progresso" },
+  { key: "playtime", label: "Tempo jogado" },
+  { key: "timeToMaster", label: "Tempo p/ platinar" },
+];
+
+function listSortValue(game, activeProfileId, key) {
+  switch (key) {
+    case "name":
+      return game.name.toLowerCase();
+    case "platform":
+      return game.raMeta?.consoleName || platformOf(game.platform).label;
+    case "achievements":
+      return game.raProgress ? game.raProgress.numAwardedToUser / Math.max(1, game.raProgress.numAchievements) : -1;
+    case "released":
+      return game.raMeta?.released || game.loreData?.released || "";
+    case "progress": {
+      const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
+      return latest?.tier ?? -1;
+    }
+    case "playtime":
+      return game.playtimeHours ?? -1;
+    case "timeToMaster":
+      return game.raProgression?.medianTimeToMasterSeconds ?? -1;
+    default:
+      return "";
+  }
+}
+
+function ListView({ games, activeProfileId, onOpen }) {
+  const [sortKey, setSortKey] = useState("name");
+  const [sortDir, setSortDir] = useState("asc");
+
+  function toggleSort(key) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  }
+
+  const sorted = [...games].sort((a, b) => {
+    const va = listSortValue(a, activeProfileId, sortKey);
+    const vb = listSortValue(b, activeProfileId, sortKey);
+    let cmp;
+    if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
+    else cmp = String(va).localeCompare(String(vb), "pt-BR");
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  return (
+    <div className="border border-zinc-800 rounded-xl overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-zinc-900 border-b border-zinc-800 text-left text-zinc-400">
+              {LIST_COLUMNS.map((col) => (
+                <th key={col.key} className="px-3 py-2 font-medium whitespace-nowrap">
+                  <button
+                    onClick={() => toggleSort(col.key)}
+                    className={`flex items-center gap-1 hover:text-zinc-200 transition-colors ${
+                      sortKey === col.key ? "text-zinc-100" : ""
+                    }`}
+                  >
+                    {col.label}
+                    <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((game) => {
+              const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
+              const gameStatus = statusOf(game.status);
+              const platinum = isPlatinum(game);
+              return (
+                <tr
+                  key={game.id}
+                  onClick={() => onOpen(game.id)}
+                  className="border-b border-zinc-900 last:border-0 hover:bg-zinc-900/60 cursor-pointer transition-colors"
+                >
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2 min-w-[200px]">
+                      <CoverThumb game={game} frame className="w-10 h-10 rounded shrink-0" />
+                      <span className="font-medium truncate">{game.name}</span>
+                      {platinum && <Award className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
+                      {game.raMeta?.consoleName || platformOf(game.platform).label}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-zinc-400">
+                    {game.raProgress ? `${game.raProgress.numAwardedToUser}/${game.raProgress.numAchievements}` : "—"}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-zinc-400">
+                    {game.raMeta?.released || game.loreData?.released || "—"}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {latest ? (
+                      <TierBadge tier={latest.tier} tierLabel={latest.tierLabel} />
+                    ) : gameStatus ? (
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${gameStatus.badge}`}>{gameStatus.label}</span>
+                    ) : (
+                      <span className="text-xs text-zinc-600">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-zinc-400">
+                    {game.playtimeHours != null ? `${game.playtimeHours}h` : "—"}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-zinc-400">
+                    {game.raProgression?.medianTimeToMasterSeconds
+                      ? formatSeconds(game.raProgression.medianTimeToMasterSeconds)
+                      : game.platform === "retro"
+                      ? "abra o jogo pra buscar"
+                      : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function TierBadge({ tier, tierLabel, size = "sm" }) {
   const meta = TIER_META[tier] || null;
   if (!meta) {
@@ -408,6 +545,7 @@ export default function CompatHub() {
   const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [onlyPlatinum, setOnlyPlatinum] = useState(false);
   const [onlyCompatible, setOnlyCompatible] = useState(true);
+  const [viewMode, setViewMode] = useState("grid");
   const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const [showAdd, setShowAdd] = useState(false);
@@ -854,6 +992,23 @@ export default function CompatHub() {
           Compatíveis com {profile.name}
         </button>
 
+        <div className="flex items-center rounded-lg border border-zinc-800 overflow-hidden ml-auto sm:ml-0">
+          <button
+            onClick={() => setViewMode("grid")}
+            title="Visualização em grade"
+            className={`p-2 transition-colors ${viewMode === "grid" ? "bg-zinc-800 text-zinc-100" : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"}`}
+          >
+            <LayoutGrid className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setViewMode("list")}
+            title="Visualização em lista"
+            className={`p-2 transition-colors ${viewMode === "list" ? "bg-zinc-800 text-zinc-100" : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"}`}
+          >
+            <List className="w-4 h-4" />
+          </button>
+        </div>
+
         <button
           onClick={() => setShowAdd(true)}
           className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2"
@@ -877,7 +1032,7 @@ export default function CompatHub() {
         </div>
       )}
 
-      {/* grid */}
+      {/* grid / lista */}
       <div className="max-w-6xl mx-auto px-5 py-6">
         {filteredGames.length === 0 ? (
           <div className="border border-dashed border-zinc-800 rounded-xl py-16 flex flex-col items-center gap-3 text-center">
@@ -896,6 +1051,8 @@ export default function CompatHub() {
               </button>
             )}
           </div>
+        ) : viewMode === "list" ? (
+          <ListView games={filteredGames} activeProfileId={activeProfileId} onOpen={setActiveGameId} />
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {filteredGames.map((game) => {
@@ -994,6 +1151,7 @@ export default function CompatHub() {
           onUpdateFranchise={(franchise) => updateGame(activeGame.id, { franchise })}
           onUpdateName={(name) => updateGame(activeGame.id, { name })}
           onUpdatePlatform={(platform) => updateGame(activeGame.id, { platform })}
+          onUpdatePlaytime={(playtimeHours) => updateGame(activeGame.id, { playtimeHours })}
           onSaveTranslations={(raTranslations) => updateGame(activeGame.id, { raTranslations })}
           onApplyRaData={(patch) => updateGame(activeGame.id, patch)}
           franchiseNotes={franchiseNotes}
@@ -1294,6 +1452,74 @@ function ProfileSwitcher({ profiles, activeProfileId, raProfile, onSwitch }) {
   );
 }
 
+// Lista de emuladores (nome + versão exata) vinculados a um perfil de
+// hardware — fica salvo com o perfil, então "PC Retrô: PCSX2 v2.2.0" não
+// se perde, e o campo "Rodando via" de cada jogo pode sugerir essas versões
+// exatas em vez do usuário ter que redigitar toda vez.
+function EmulatorsField({ emulators, onChange }) {
+  const [name, setName] = useState("");
+  const [version, setVersion] = useState("");
+
+  function addEmulator() {
+    if (!name.trim()) return;
+    onChange([...emulators, { id: uid(), name: name.trim(), version: version.trim() }]);
+    setName("");
+    setVersion("");
+  }
+
+  function removeEmulator(id) {
+    onChange(emulators.filter((e) => e.id !== id));
+  }
+
+  return (
+    <div className="mb-4">
+      <label className="text-xs text-zinc-400 mb-1 block">Emuladores deste perfil (com a versão exata)</label>
+      {emulators.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {emulators.map((e) => (
+            <span
+              key={e.id}
+              className="flex items-center gap-1.5 text-xs bg-zinc-950 border border-zinc-800 rounded-full pl-2.5 pr-1.5 py-1 text-zinc-300"
+            >
+              {e.name}{e.version && <span className="text-zinc-500">v{e.version}</span>}
+              <button onClick={() => removeEmulator(e.id)} className="text-zinc-600 hover:text-red-400 transition-colors">
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-1.5">
+        <input
+          value={name}
+          onChange={(ev) => setName(ev.target.value)}
+          onKeyDown={(ev) => { if (ev.key === "Enter") { ev.preventDefault(); addEmulator(); } }}
+          placeholder="ex: PCSX2"
+          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+        />
+        <input
+          value={version}
+          onChange={(ev) => setVersion(ev.target.value)}
+          onKeyDown={(ev) => { if (ev.key === "Enter") { ev.preventDefault(); addEmulator(); } }}
+          placeholder="versão (ex: 2.2.0)"
+          className="w-32 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+        />
+        <button
+          type="button"
+          onClick={addEmulator}
+          disabled={!name.trim()}
+          className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 px-3 rounded-lg text-sm transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+        </button>
+      </div>
+      <p className="text-xs text-zinc-600 mt-1">
+        Essas versões aparecem como sugestão no campo "Rodando via" de cada jogo, quando este perfil está ativo.
+      </p>
+    </div>
+  );
+}
+
 function ProfileModal({ profiles, activeProfileId, games = [], raProfile, onClose, onSave }) {
   const [list, setList] = useState(profiles);
   const [editingId, setEditingId] = useState(activeProfileId);
@@ -1473,6 +1699,11 @@ function ProfileModal({ profiles, activeProfileId, games = [], raProfile, onClos
           </div>
         ))}
 
+        <EmulatorsField
+          emulators={editing.emulators || []}
+          onChange={(next) => updateField("emulators", next)}
+        />
+
         <label className="text-xs text-zinc-400 mb-1 block">Preferências gerais / objetivos</label>
         <textarea
           value={editing.preferences}
@@ -1512,7 +1743,7 @@ function RetroAchievementsSection({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
-  const [progression, setProgression] = useState(null);
+  const [progression, setProgression] = useState(game.raProgression || null);
   const [showAll, setShowAll] = useState(false);
   const [translations, setTranslations] = useState(game.raTranslations || {});
   const [translating, setTranslating] = useState(false);
@@ -1540,6 +1771,7 @@ function RetroAchievementsSection({
           publisher: body.publisher,
           genre: body.genre,
           released: body.released,
+          consoleName: body.consoleName,
         },
         raAward: { kind: body.highestAwardKind, date: body.highestAwardDate },
         raPlaySpan: { first: body.firstUnlockDate, last: body.lastUnlockDate },
@@ -1549,9 +1781,14 @@ function RetroAchievementsSection({
       onApplyRaData(patch);
 
       // Tempo médio da comunidade (não bloqueia a UI principal se falhar).
+      // Guardado permanentemente no jogo (não só no estado local) pra
+      // aparecer na visualização em lista sem precisar reabrir o card.
       fetch(`/api/retroachievements/progression?gameId=${encodeURIComponent(id)}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((p) => setProgression(p))
+        .then((p) => {
+          setProgression(p);
+          if (p) onApplyRaData({ raProgression: p });
+        })
         .catch(() => setProgression(null));
     } catch (e) {
       setError(e.message);
@@ -1950,13 +2187,18 @@ function GameLoreSection({ game, onApplyLore }) {
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
-  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onUpdatePlatform, onSaveTranslations, onApplyRaData,
+  onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onUpdatePlatform, onUpdatePlaytime, onSaveTranslations, onApplyRaData,
   franchiseNotes, onUpdateFranchiseNotes,
   onRemove,
 }) {
   const [noteText, setNoteText] = useState("");
   const [goalsText, setGoalsText] = useState(game.goals || "");
   const [runningViaText, setRunningViaText] = useState(game.runningVia || "");
+  const [playtimeText, setPlaytimeText] = useState(game.playtimeHours ?? "");
+
+  useEffect(() => {
+    setPlaytimeText(game.playtimeHours ?? "");
+  }, [game.playtimeHours]);
   const [franchiseText, setFranchiseText] = useState(game.franchise || "");
   const [editingName, setEditingName] = useState(false);
   const [nameText, setNameText] = useState(game.name);
@@ -2201,11 +2443,37 @@ function GameDetailModal({
               {RUNNING_VIA_SUGGESTIONS.map((opt) => (
                 <option key={opt} value={opt} />
               ))}
+              {/* versões exatas cadastradas no perfil de hardware ativo —
+                  ver aba "Perfis de hardware" > Emuladores deste perfil */}
+              {(profiles.find((p) => p.id === activeProfileId)?.emulators || []).map((e) => (
+                <option key={e.id} value={e.version ? `${e.name} v${e.version}` : e.name} />
+              ))}
             </datalist>
             <p className="text-xs text-zinc-600 mt-1">
               Se você já sabe que vai usar uma versão específica (ex: uma mais antiga por compatibilidade), inclua
-              aqui — a análise passa a considerar isso em vez de assumir a versão mais recente.
+              aqui — a análise passa a considerar isso em vez de assumir a versão mais recente. As versões
+              cadastradas no perfil "{activeProfileName}" aparecem como sugestão automática.
             </p>
+          </div>
+
+          {/* tempo jogado manual — pra plataformas sem fonte automática
+              (Steam/GOG/Epic/Amazon). Pra Retro/ISO o RA já dá uma estimativa
+              (intervalo entre conquistas), mas esse campo funciona pra
+              qualquer plataforma se você preferir registrar à mão. */}
+          <div className="mb-5">
+            <label className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+              <Clock className="w-3.5 h-3.5" /> Tempo jogado (horas, manual)
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              value={playtimeText}
+              onChange={(e) => setPlaytimeText(e.target.value)}
+              onBlur={() => onUpdatePlaytime(playtimeText === "" ? null : Number(playtimeText))}
+              placeholder="ex: 24"
+              className="w-32 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+            />
           </div>
 
           {/* franquia */}
