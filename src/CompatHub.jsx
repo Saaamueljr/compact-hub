@@ -1181,12 +1181,14 @@ function PdfReaderModal({ url, title, onClose }) {
   const [numPages, setNumPages] = useState(0);
   const [pageNum, setPageNum] = useState(1);
   const [pageInput, setPageInput] = useState("1");
-  const [scale, setScale] = useState(1.2);
+  const [scale, setScale] = useState(1.4);
   const [loading, setLoading] = useState(true);
   const [rendering, setRendering] = useState(false);
+  const [turning, setTurning] = useState(false);
   const [error, setError] = useState("");
   const canvasRef = useRef(null);
   const renderTaskRef = useRef(null);
+  const touchStartX = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1232,13 +1234,26 @@ function PdfReaderModal({ url, title, onClose }) {
       const viewport = page.getViewport({ scale });
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const task = page.render({ canvasContext: ctx, viewport });
+
+      // Correção de nitidez: sem isso, o canvas renderiza em resolução
+      // "lógica" (CSS) e a tela redimensiona/borra em qualquer monitor com
+      // devicePixelRatio > 1 (praticamente todo mundo hoje). Renderiza na
+      // resolução FÍSICA da tela e escala de volta via CSS.
+      const outputScale = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(viewport.width * outputScale);
+      canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.style.width = `${Math.floor(viewport.width)}px`;
+      canvas.style.height = `${Math.floor(viewport.height)}px`;
+      const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
+
+      const task = page.render({ canvasContext: ctx, viewport, transform });
       renderTaskRef.current = task;
       task.promise
         .then(() => {
-          if (!cancelled) setRendering(false);
+          if (!cancelled) {
+            setRendering(false);
+            setTurning(false);
+          }
         })
         .catch(() => {
           if (!cancelled) setRendering(false);
@@ -1251,8 +1266,45 @@ function PdfReaderModal({ url, title, onClose }) {
 
   function goToPage(n) {
     const clamped = Math.max(1, Math.min(numPages, n));
+    if (clamped === pageNum) return;
+    setTurning(true);
     setPageNum(clamped);
     setPageInput(String(clamped));
+  }
+
+  // navegação por teclado — setas do lado, como num leitor de verdade
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "ArrowRight") goToPage(pageNum + 1);
+      if (e.key === "ArrowLeft") goToPage(pageNum - 1);
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageNum, numPages]);
+
+  // clique na própria página: metade direita = próxima, esquerda = anterior
+  // — é assim que qualquer leitor de revista/quadrinho funciona, bem mais
+  // natural que só os botõezinhos lá em cima.
+  function handlePageClick(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    if (clickX > rect.width / 2) goToPage(pageNum + 1);
+    else goToPage(pageNum - 1);
+  }
+
+  function handleTouchStart(e) {
+    touchStartX.current = e.touches[0].clientX;
+  }
+  function handleTouchEnd(e) {
+    if (touchStartX.current === null) return;
+    const delta = e.changedTouches[0].clientX - touchStartX.current;
+    if (Math.abs(delta) > 50) {
+      if (delta < 0) goToPage(pageNum + 1);
+      else goToPage(pageNum - 1);
+    }
+    touchStartX.current = null;
   }
 
   return (
@@ -1320,13 +1372,24 @@ function PdfReaderModal({ url, title, onClose }) {
           </div>
         )}
         {!loading && !error && (
-          <div className="relative">
+          <div
+            className="relative select-none cursor-pointer"
+            onClick={handlePageClick}
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+            title="Clique na direita pra avançar, na esquerda pra voltar (ou use as setas do teclado)"
+          >
             {rendering && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-10">
                 <Loader2 className="w-5 h-5 animate-spin text-zinc-400" />
               </div>
             )}
-            <canvas ref={canvasRef} className="shadow-2xl shadow-black/60 bg-white" />
+            <canvas
+              ref={canvasRef}
+              className={`shadow-2xl shadow-black/60 bg-white transition-all duration-200 ${
+                turning ? "opacity-40 scale-[0.985]" : "opacity-100 scale-100"
+              }`}
+            />
           </div>
         )}
       </div>
