@@ -1,8 +1,13 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
-  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen
+  Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
+  ZoomIn, ZoomOut, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -1167,6 +1172,168 @@ export default function CompatHub() {
   );
 }
 
+// Leitor de PDF embutido (detonados/revistas digitais vinculados via link do
+// Drive). Usa PDF.js — renderiza só a página atual num canvas, então
+// carrega rápido mesmo em PDFs grandes (revista inteira escaneada), com zoom
+// de verdade em vez do preview truncado do Drive.
+function PdfReaderModal({ url, title, onClose }) {
+  const [doc, setDoc] = useState(null);
+  const [numPages, setNumPages] = useState(0);
+  const [pageNum, setPageNum] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
+  const [scale, setScale] = useState(1.2);
+  const [loading, setLoading] = useState(true);
+  const [rendering, setRendering] = useState(false);
+  const [error, setError] = useState("");
+  const canvasRef = useRef(null);
+  const renderTaskRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    const proxyUrl = `/api/pdf-proxy?url=${encodeURIComponent(url)}`;
+    pdfjsLib
+      .getDocument(proxyUrl)
+      .promise.then((pdf) => {
+        if (cancelled) return;
+        setDoc(pdf);
+        setNumPages(pdf.numPages);
+        setPageNum(1);
+        setPageInput("1");
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e.message || "Não foi possível abrir o PDF.");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  useEffect(() => {
+    if (!doc || !canvasRef.current) return;
+    let cancelled = false;
+    setRendering(true);
+    // se trocar de página/zoom rápido, cancela a renderização anterior em
+    // vez de deixar acumular — evita travar em PDFs grandes.
+    if (renderTaskRef.current) {
+      try {
+        renderTaskRef.current.cancel();
+      } catch {
+        // ok cancelar uma renderização que já tinha terminado
+      }
+    }
+    doc.getPage(pageNum).then((page) => {
+      if (cancelled) return;
+      const viewport = page.getViewport({ scale });
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const task = page.render({ canvasContext: ctx, viewport });
+      renderTaskRef.current = task;
+      task.promise
+        .then(() => {
+          if (!cancelled) setRendering(false);
+        })
+        .catch(() => {
+          if (!cancelled) setRendering(false);
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, pageNum, scale]);
+
+  function goToPage(n) {
+    const clamped = Math.max(1, Math.min(numPages, n));
+    setPageNum(clamped);
+    setPageInput(String(clamped));
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/90 flex flex-col">
+      <div className="flex items-center gap-2 px-4 py-3 bg-zinc-950 border-b border-zinc-800 shrink-0">
+        <BookOpen className="w-4 h-4 text-zinc-500 shrink-0" />
+        <p className="text-sm text-zinc-300 truncate flex-1 min-w-0">{title}</p>
+
+        {numPages > 0 && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => goToPage(pageNum - 1)}
+              disabled={pageNum <= 1}
+              className="p-1.5 rounded hover:bg-zinc-800 disabled:opacity-30 transition-colors"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <input
+              value={pageInput}
+              onChange={(e) => setPageInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") goToPage(Number(pageInput) || 1); }}
+              onBlur={() => goToPage(Number(pageInput) || 1)}
+              className="w-12 bg-zinc-900 border border-zinc-800 rounded px-1.5 py-1 text-xs text-center outline-none focus:border-indigo-600"
+            />
+            <span className="text-xs text-zinc-500">/ {numPages}</span>
+            <button
+              onClick={() => goToPage(pageNum + 1)}
+              disabled={pageNum >= numPages}
+              className="p-1.5 rounded hover:bg-zinc-800 disabled:opacity-30 transition-colors"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-1.5 shrink-0 border-l border-zinc-800 pl-2.5 ml-1">
+          <button onClick={() => setScale((s) => Math.max(0.4, s - 0.2))} className="p-1.5 rounded hover:bg-zinc-800 transition-colors">
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <span className="text-xs text-zinc-500 w-10 text-center">{Math.round(scale * 100)}%</span>
+          <button onClick={() => setScale((s) => Math.min(4, s + 0.2))} className="p-1.5 rounded hover:bg-zinc-800 transition-colors">
+            <ZoomIn className="w-4 h-4" />
+          </button>
+        </div>
+
+        <button onClick={onClose} className="p-1.5 rounded hover:bg-zinc-800 transition-colors ml-1 shrink-0">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-auto flex items-start justify-center p-4">
+        {loading && (
+          <div className="flex flex-col items-center gap-2 text-zinc-500 mt-20">
+            <Loader2 className="w-6 h-6 animate-spin" />
+            <p className="text-sm">Abrindo revista...</p>
+          </div>
+        )}
+        {error && (
+          <div className="flex flex-col items-center gap-2 text-center mt-20 max-w-sm">
+            <AlertTriangle className="w-6 h-6 text-rose-400" />
+            <p className="text-sm text-rose-400">{error}</p>
+            <p className="text-xs text-zinc-600">
+              Confira se o link do Drive está compartilhado como "qualquer pessoa com o link pode ver".
+            </p>
+          </div>
+        )}
+        {!loading && !error && (
+          <div className="relative">
+            {rendering && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                <Loader2 className="w-5 h-5 animate-spin text-zinc-400" />
+              </div>
+            )}
+            <canvas ref={canvasRef} className="shadow-2xl shadow-black/60 bg-white" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ModalShell({ children, onClose, maxW = "max-w-lg", frameVariant, frameSeed }) {
   return (
     <div className="fixed inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
@@ -2204,6 +2371,7 @@ function GameDetailModal({
     setPlaytimeText(game.playtimeHours ?? "");
   }, [game.playtimeHours]);
   const [guideUrlText, setGuideUrlText] = useState(game.guideUrl || "");
+  const [showReader, setShowReader] = useState(false);
   useEffect(() => {
     setGuideUrlText(game.guideUrl || "");
   }, [game.guideUrl]);
@@ -2499,17 +2667,31 @@ function GameDetailModal({
                 className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
               />
               {game.guideUrl && (
-                <a
-                  href={game.guideUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 px-3 rounded-lg transition-colors shrink-0"
-                >
-                  <BookOpen className="w-3.5 h-3.5" /> abrir
-                </a>
+                /drive\.google\.com/.test(game.guideUrl) ? (
+                  <button
+                    onClick={() => setShowReader(true)}
+                    className="flex items-center gap-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 px-3 rounded-lg transition-colors shrink-0"
+                  >
+                    <BookOpen className="w-3.5 h-3.5" /> abrir
+                  </button>
+                ) : (
+                  <a
+                    href={game.guideUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Leitor embutido só funciona com links do Google Drive por enquanto — abrindo em nova aba"
+                    className="flex items-center gap-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 px-3 rounded-lg transition-colors shrink-0"
+                  >
+                    <BookOpen className="w-3.5 h-3.5" /> abrir
+                  </a>
+                )
               )}
             </div>
           </div>
+
+          {showReader && (
+            <PdfReaderModal url={game.guideUrl} title={game.name} onClose={() => setShowReader(false)} />
+          )}
 
           {/* franquia */}
           <div className="mb-5">

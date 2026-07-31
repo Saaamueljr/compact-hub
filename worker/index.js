@@ -268,6 +268,70 @@ A lista "order" deve conter TODOS os jogos da lista acima, na ordem recomendada 
   return json(result.data);
 }
 
+// Proxy pro PDF de um link do Google Drive — o leitor embutido (PDF.js) roda
+// no navegador e não consegue baixar direto do Drive por causa de CORS, então
+// o worker busca os bytes do lado do servidor e repassa. Também lida com a
+// página de confirmação que o Drive mostra em arquivos grandes (aviso de
+// "não foi possível verificar vírus"), que aparece no lugar do PDF direto.
+async function handlePdfProxy(request, env) {
+  const url = new URL(request.url);
+  const driveUrl = url.searchParams.get("url");
+  if (!driveUrl) return json({ error: "Falta o parâmetro url." }, 400);
+
+  const idMatch = driveUrl.match(/\/d\/([a-zA-Z0-9_-]+)/) || driveUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  const fileId = idMatch ? idMatch[1] : null;
+  if (!fileId) {
+    return json({ error: "Não consegui identificar o ID do arquivo nesse link do Drive." }, 400);
+  }
+
+  async function fetchDrive(u) {
+    try {
+      return await fetch(u, { redirect: "follow" });
+    } catch (e) {
+      throw new Error(`Falha ao contatar o Google Drive: ${e.message}`);
+    }
+  }
+
+  let response;
+  try {
+    response = await fetchDrive(`https://drive.google.com/uc?export=download&id=${fileId}`);
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      const html = await response.text();
+      const tokenMatch = html.match(/confirm=([0-9A-Za-z_-]+)/) || html.match(/name="confirm"\s+value="([0-9A-Za-z_-]+)"/);
+      const uuidMatch = html.match(/name="uuid"\s+value="([0-9A-Za-z_-]+)"/);
+      if (!tokenMatch) {
+        return json(
+          {
+            error:
+              "O Drive não retornou o PDF diretamente. Confira se o link está compartilhado como \"qualquer pessoa com o link pode ver\".",
+          },
+          502
+        );
+      }
+      let confirmUrl = `https://drive.google.com/uc?export=download&confirm=${tokenMatch[1]}&id=${fileId}`;
+      if (uuidMatch) confirmUrl += `&uuid=${uuidMatch[1]}`;
+      response = await fetchDrive(confirmUrl);
+    }
+  } catch (e) {
+    return json({ error: e.message }, 502);
+  }
+
+  if (!response.ok) {
+    return json({ error: `Google Drive retornou erro ${response.status}.` }, 502);
+  }
+
+  return new Response(response.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Cache-Control": "private, max-age=3600",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 // Capa via SteamGridDB — pra jogos de lojas sem API pública decente
 // (GOG/Epic/Amazon). Busca por NOME (essas lojas não têm um "ID" universal
 // consultável), pega o primeiro resultado com imagem disponível.
@@ -714,6 +778,16 @@ export default {
       }
       if (request.method === "GET") {
         return handleCoverArt(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/pdf-proxy") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handlePdfProxy(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
