@@ -199,15 +199,16 @@ async function callAnalysis({ profile, game, notesText }) {
     throw new Error(errBody.error || `Falha na análise (HTTP ${response.status})`);
   }
 
+  // O worker já faz o parse do JSON do Gemini no servidor (ver
+  // handleAnalyze em worker/index.js) e devolve os campos prontos
+  // (tier, veredito, motivo...), então não precisamos reparsear nada aqui.
   const data = await response.json();
-  const cleaned = (data.text || "").replace(/```json|```/g, "").trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("Não consegui interpretar a resposta da análise.");
+  if (typeof data.tier !== "number" || !data.tierLabel) {
+    throw new Error(
+      `Resposta da análise veio incompleta (faltou tier/tierLabel). Recebido: ${JSON.stringify(data).slice(0, 200)}`
+    );
   }
+  return data;
 }
 
 // Gera um conjunto de "estrelas" com posições pseudo-aleatórias e ESTÁVEIS
