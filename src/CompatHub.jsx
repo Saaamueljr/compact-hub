@@ -1,16 +1,22 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { driveSync } from "./lib/driveSync";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
-  ZoomIn, ZoomOut, ChevronLeft, ChevronRight
+  ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
+
+// Client ID OAuth do Google Cloud (não é segredo — é feito pra ficar exposto
+// no client-side). Gerado em console.cloud.google.com > APIs e serviços >
+// Credenciais > ID do cliente OAuth (tipo "Aplicativo da Web").
+const GOOGLE_DRIVE_CLIENT_ID = "872251667165-n77afe9fcmgt69lmf0b1jmbennij5cho.apps.googleusercontent.com";
 
 const PLATFORMS = [
   { id: "steam", label: "Steam", badge: "bg-sky-900 text-sky-300 border border-sky-700" },
@@ -556,6 +562,7 @@ export default function CompatHub() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showNews, setShowNews] = useState(false);
   const [activeGameId, setActiveGameId] = useState(null);
 
   const [analyzing, setAnalyzing] = useState({});
@@ -574,28 +581,40 @@ export default function CompatHub() {
   // vez que a franquia for aberta. Chave = nome da franquia em minúsculo.
   const [franchiseNotes, setFranchiseNotes] = useState({});
 
+  // --- Google Drive sync ---
+  // 'disconnected' | 'connecting' | 'connected' | 'syncing' | 'error'
+  const [driveStatus, setDriveStatus] = useState("disconnected");
+  const [driveError, setDriveError] = useState("");
+  const driveInitedRef = useRef(false);
+  const driveSaveTimerRef = useRef(null);
+
   const profile = profiles.find((p) => p.id === activeProfileId) || profiles[0];
+
+  // Aplica um payload carregado (de localStorage OU do Drive) no estado do
+  // React. Centralizado aqui porque tanto o boot normal quanto a conexão
+  // com o Drive (que pode trazer um snapshot mais novo) precisam disso.
+  function applyLoadedData(parsed) {
+    if (!parsed) return;
+    if (parsed.profiles && parsed.profiles.length > 0) {
+      setProfiles(parsed.profiles);
+      setActiveProfileId(parsed.activeProfileId || parsed.profiles[0].id);
+    } else if (parsed.profile) {
+      const migrated = [{ id: "default-profile", name: "Principal", ...parsed.profile }];
+      setProfiles(migrated);
+      setActiveProfileId(migrated[0].id);
+    }
+    const schemaVersion = parsed.tierSchemaVersion || 1;
+    const loadedGames = parsed.games || [];
+    setGames(schemaVersion < 2 ? migrateTierScale(loadedGames) : loadedGames);
+    setFranchiseNotes(parsed.franchiseNotes || {});
+  }
 
   useEffect(() => {
     (async () => {
       try {
         const res = await storage.get(STORAGE_KEY);
         if (res && res.value) {
-          const parsed = JSON.parse(res.value);
-          // Migração: dados antigos tinham um único "profile". Se não existir
-          // "profiles" (array novo), converte o antigo em perfil "Principal".
-          if (parsed.profiles && parsed.profiles.length > 0) {
-            setProfiles(parsed.profiles);
-            setActiveProfileId(parsed.activeProfileId || parsed.profiles[0].id);
-          } else if (parsed.profile) {
-            const migrated = [{ id: "default-profile", name: "Principal", ...parsed.profile }];
-            setProfiles(migrated);
-            setActiveProfileId(migrated[0].id);
-          }
-          const schemaVersion = parsed.tierSchemaVersion || 1;
-          const loadedGames = parsed.games || [];
-          setGames(schemaVersion < 2 ? migrateTierScale(loadedGames) : loadedGames);
-          setFranchiseNotes(parsed.franchiseNotes || {});
+          applyLoadedData(JSON.parse(res.value));
         }
       } catch {
         // sem dados salvos ainda — segue com os padrões
@@ -604,6 +623,53 @@ export default function CompatHub() {
       }
     })();
   }, []);
+
+  // Tenta restaurar uma sessão de Drive já autorizada anteriormente (o token
+  // do Google dura ~1h e fica em sessionStorage — ver driveSync.js). Se
+  // existir, puxa o snapshot mais recente do Drive por cima do que acabou de
+  // carregar do localStorage (o Drive é a fonte de verdade quando conectado).
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        await driveSync.init(GOOGLE_DRIVE_CLIENT_ID);
+        driveInitedRef.current = true;
+        if (driveSync.isSignedIn()) {
+          setDriveStatus("syncing");
+          const remote = await driveSync.load();
+          if (remote) applyLoadedData(remote);
+          setDriveStatus("connected");
+        }
+      } catch (e) {
+        // token expirado ou GIS indisponível — usuário precisa reconectar
+        // manualmente, sem quebrar o app (segue funcionando local).
+        setDriveStatus("disconnected");
+      }
+    })();
+  }, [loaded]);
+
+  async function connectDrive() {
+    setDriveError("");
+    setDriveStatus("connecting");
+    try {
+      if (!driveInitedRef.current) {
+        await driveSync.init(GOOGLE_DRIVE_CLIENT_ID);
+        driveInitedRef.current = true;
+      }
+      await driveSync.signIn();
+      const { data } = await driveSync.migrateFromLocalStorageIfNeeded(STORAGE_KEY);
+      if (data) applyLoadedData(data);
+      setDriveStatus("connected");
+    } catch (e) {
+      setDriveStatus("error");
+      setDriveError(e?.message || "Falha ao conectar com o Google Drive.");
+    }
+  }
+
+  function disconnectDrive() {
+    driveSync.signOut();
+    setDriveStatus("disconnected");
+  }
 
   // Evento da semana (Achievement of the Week) e perfil da conta do RA —
   // buscados uma vez ao abrir o app. Falha silenciosamente se o RA não
@@ -622,20 +688,39 @@ export default function CompatHub() {
   }, []);
 
   async function persist(nextProfiles, nextActiveProfileId, nextGames, nextFranchiseNotes = franchiseNotes) {
+    const payload = {
+      profiles: nextProfiles,
+      activeProfileId: nextActiveProfileId,
+      games: nextGames,
+      franchiseNotes: nextFranchiseNotes,
+      tierSchemaVersion: 2,
+    };
     try {
-      await storage.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          profiles: nextProfiles,
-          activeProfileId: nextActiveProfileId,
-          games: nextGames,
-          franchiseNotes: nextFranchiseNotes,
-          tierSchemaVersion: 2,
-        })
-      );
+      await storage.set(STORAGE_KEY, JSON.stringify(payload));
     } catch (e) {
-      console.error("Erro ao salvar:", e);
+      console.error("Erro ao salvar localmente:", e);
     }
+    scheduleDriveSave(payload);
+  }
+
+  // Escreve no Drive com debounce — evita disparar uma requisição a cada
+  // pequena mudança (ex: editando o campo de horas jogadas tecla a tecla).
+  // Só age se o usuário estiver conectado; falha silenciosamente no console
+  // se o Drive der erro, já que o dado já está seguro no localStorage.
+  function scheduleDriveSave(payload) {
+    if (!driveSync.isSignedIn()) return;
+    if (driveSaveTimerRef.current) clearTimeout(driveSaveTimerRef.current);
+    driveSaveTimerRef.current = setTimeout(async () => {
+      setDriveStatus("syncing");
+      try {
+        await driveSync.save(payload);
+        setDriveStatus("connected");
+      } catch (e) {
+        console.error("Erro ao sincronizar com o Drive:", e);
+        setDriveStatus("error");
+        setDriveError(e?.message || "Falha ao sincronizar com o Google Drive.");
+      }
+    }, 1500);
   }
 
   function updateFranchiseNotes(key, data) {
@@ -860,13 +945,30 @@ export default function CompatHub() {
             <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs text-zinc-400">{profile.ram}</span>
           </div>
 
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => setShowNews(true)}
+              className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
+            >
+              <Newspaper className="w-3.5 h-3.5" />
+              Notícias
+            </button>
+
+            <DriveSyncButton
+              status={driveStatus}
+              error={driveError}
+              onConnect={connectDrive}
+              onDisconnect={disconnectDrive}
+            />
+
           <button
             onClick={() => setShowProfile(true)}
-            className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
           >
             <Settings2 className="w-3.5 h-3.5" />
             Perfis de hardware
           </button>
+          </div>
         </div>
       </div>
 
@@ -1137,6 +1239,9 @@ export default function CompatHub() {
           onSave={(nextProfiles, nextActiveId) => { updateProfiles(nextProfiles, nextActiveId); setShowProfile(false); }}
         />
       )}
+
+      {/* modal: notícias e wiki (estilo revista) */}
+      {showNews && <NewsModal onClose={() => setShowNews(false)} />}
 
       {/* modal: detalhe do jogo */}
       {activeGame && (
@@ -1421,6 +1526,195 @@ function ModalShell({ children, onClose, maxW = "max-w-lg", frameVariant, frameS
   );
 }
 
+// Cor por fonte, no mesmo espírito do badge de plataforma — cada fonte tem
+// uma identidade visual fixa, então a "revista" fica escaneável de longe.
+const NEWS_SOURCE_META = {
+  IGN: { badge: "bg-red-900/60 text-red-300 border border-red-700" },
+  Eurogamer: { badge: "bg-purple-900/60 text-purple-300 border border-purple-700" },
+  Steam: { badge: "bg-sky-900/60 text-sky-300 border border-sky-700" },
+};
+
+function sourceMeta(source) {
+  return NEWS_SOURCE_META[source] || { badge: "bg-zinc-800 text-zinc-300 border border-zinc-700" };
+}
+
+function timeAgo(pubDate) {
+  if (!pubDate) return null;
+  const ts = Date.parse(pubDate);
+  if (Number.isNaN(ts)) return null;
+  const diffMs = Date.now() - ts;
+  const hours = Math.floor(diffMs / 3600000);
+  if (hours < 1) return "agora há pouco";
+  if (hours < 24) return `há ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `há ${days}d`;
+}
+
+// Painel de notícias estilo "revista": manchete grande em destaque + grid de
+// cards com foto, fonte e resumo. Alimentado por /api/news (RSS agregado,
+// sem chave de API necessária — ver worker/index.js).
+function NewsModal({ onClose }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [feedErrors, setFeedErrors] = useState([]);
+  const [activeSource, setActiveSource] = useState("all");
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch("/api/news");
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || "Falha ao carregar notícias.");
+        setItems(body.items || []);
+        setFeedErrors(body.feedErrors || []);
+      } catch (e) {
+        setError(e.message || "Falha ao carregar notícias.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const sources = useMemo(() => Array.from(new Set(items.map((i) => i.source))), [items]);
+  const filtered = activeSource === "all" ? items : items.filter((i) => i.source === activeSource);
+  const [hero, ...rest] = filtered;
+
+  return (
+    <ModalShell onClose={onClose} maxW="max-w-4xl">
+      <div className="p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
+            <Newspaper className="w-5 h-5 text-zinc-400" />
+            Notícias &amp; wiki
+          </h2>
+        </div>
+
+        {sources.length > 1 && (
+          <div className="flex flex-wrap gap-2 mb-5">
+            <button
+              onClick={() => setActiveSource("all")}
+              className={`text-xs rounded-full px-3 py-1 border transition-colors ${
+                activeSource === "all"
+                  ? "bg-zinc-100 text-zinc-900 border-zinc-100"
+                  : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200"
+              }`}
+            >
+              Todas
+            </button>
+            {sources.map((s) => (
+              <button
+                key={s}
+                onClick={() => setActiveSource(s)}
+                className={`text-xs rounded-full px-3 py-1 border transition-colors ${
+                  activeSource === s
+                    ? "bg-zinc-100 text-zinc-900 border-zinc-100"
+                    : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200"
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {loading && (
+          <div className="flex items-center justify-center py-16 text-zinc-500 gap-2 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Carregando notícias...
+          </div>
+        )}
+
+        {!loading && error && (
+          <div className="flex items-center gap-2 text-sm text-red-300 bg-red-950/40 border border-red-900 rounded-lg px-4 py-3">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && filtered.length === 0 && (
+          <p className="text-sm text-zinc-500 py-10 text-center">Nenhuma notícia encontrada no momento.</p>
+        )}
+
+        {!loading && !error && hero && (
+          <a
+            href={hero.link}
+            target="_blank"
+            rel="noreferrer"
+            className="group block rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 mb-5"
+          >
+            <div className="relative aspect-[21/9] bg-zinc-900">
+              {hero.image ? (
+                <img
+                  src={hero.image}
+                  alt=""
+                  className="w-full h-full object-cover group-hover:opacity-90 transition-opacity"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <Newspaper className="w-10 h-10 text-zinc-700" />
+                </div>
+              )}
+              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-5">
+                <span className={`inline-block text-[11px] font-medium rounded-full px-2.5 py-1 mb-2 ${sourceMeta(hero.source).badge}`}>
+                  {hero.source}
+                </span>
+                <h3 className="text-white text-xl font-semibold leading-snug">{hero.title}</h3>
+                {timeAgo(hero.pubDate) && (
+                  <p className="text-zinc-300 text-xs mt-1">{timeAgo(hero.pubDate)}</p>
+                )}
+              </div>
+            </div>
+          </a>
+        )}
+
+        {!loading && !error && rest.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {rest.map((item, i) => (
+              <a
+                key={`${item.link}-${i}`}
+                href={item.link}
+                target="_blank"
+                rel="noreferrer"
+                className="group flex gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 hover:border-zinc-600 transition-colors"
+              >
+                <div className="w-24 h-16 shrink-0 rounded-md overflow-hidden bg-zinc-900">
+                  {item.image ? (
+                    <img src={item.image} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Newspaper className="w-5 h-5 text-zinc-700" />
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex flex-col">
+                  <span className={`inline-block self-start text-[10px] font-medium rounded-full px-2 py-0.5 mb-1 ${sourceMeta(item.source).badge}`}>
+                    {item.source}
+                  </span>
+                  <p className="text-sm text-zinc-200 font-medium leading-snug line-clamp-2 group-hover:text-white">
+                    {item.title}
+                  </p>
+                  {timeAgo(item.pubDate) && (
+                    <p className="text-[11px] text-zinc-500 mt-auto pt-1">{timeAgo(item.pubDate)}</p>
+                  )}
+                </div>
+              </a>
+            ))}
+          </div>
+        )}
+
+        {!loading && feedErrors.length > 0 && (
+          <p className="text-[11px] text-zinc-600 mt-5">
+            Algumas fontes falharam ao carregar: {feedErrors.join(" · ")}
+          </p>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
 function AddGameModal({ games, onClose, onAdd }) {
   const [name, setName] = useState("");
   const [platform, setPlatform] = useState("steam");
@@ -1632,6 +1926,82 @@ function AddGameModal({ games, onClose, onAdd }) {
 // <select> nativo, que não permite mostrar imagem/avatar nas opções). O
 // perfil marcado como raLinked mostra o avatar da conta RA em vez do ícone
 // genérico — tanto no botão (quando ativo) quanto na lista.
+// Botão + dropdown de status da sincronização com o Google Drive. Fica no
+// header, ao lado de "Perfis de hardware". Estados possíveis: desconectado
+// (botão neutro "Conectar Drive"), conectando, sincronizado (nuvem verde),
+// sincronizando (nuvem girando) e erro (nuvem vermelha + tooltip do erro).
+function DriveSyncButton({ status, error, onConnect, onDisconnect }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  if (status === "disconnected") {
+    return (
+      <button
+        onClick={onConnect}
+        className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
+      >
+        <CloudOff className="w-3.5 h-3.5" />
+        Conectar Drive
+      </button>
+    );
+  }
+
+  const isSyncing = status === "connecting" || status === "syncing";
+  const isError = status === "error";
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title={isError ? error : isSyncing ? "Sincronizando..." : "Sincronizado com o Google Drive"}
+        className={`flex items-center gap-1.5 text-xs border rounded-md px-3 py-1.5 transition-colors ${
+          isError
+            ? "text-red-300 border-red-800 hover:border-red-600"
+            : "text-emerald-300 border-emerald-800 hover:border-emerald-600"
+        }`}
+      >
+        {isSyncing ? (
+          <CloudCog className="w-3.5 h-3.5 animate-spin" />
+        ) : isError ? (
+          <CloudOff className="w-3.5 h-3.5" />
+        ) : (
+          <Cloud className="w-3.5 h-3.5" />
+        )}
+        Drive
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-1 w-56 bg-zinc-950 border border-zinc-800 rounded-lg shadow-xl p-3 z-30 text-xs">
+          <p className="text-zinc-300 mb-2">
+            {isError
+              ? error || "Erro ao sincronizar com o Drive."
+              : isSyncing
+              ? "Sincronizando sua biblioteca..."
+              : "Sua biblioteca está sincronizada com o Google Drive."}
+          </p>
+          <button
+            onClick={() => {
+              onDisconnect();
+              setOpen(false);
+            }}
+            className="w-full text-left text-zinc-400 hover:text-red-300 transition-colors"
+          >
+            Desconectar
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfileSwitcher({ profiles, activeProfileId, raProfile, onSwitch }) {
   const [open, setOpen] = useState(false);
   const active = profiles.find((p) => p.id === activeProfileId) || profiles[0];

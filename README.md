@@ -90,6 +90,39 @@ Se você não configurou a variável antes do primeiro deploy, sem problema: adi
 
 Enquanto o uso ficar dentro do tier gratuito do Gemini (na casa de milhares de consultas por mês, bem acima do que uma biblioteca pessoal gera) e do Cloudflare Pages (100 mil requisições/dia), **o custo é zero**. Se algum dia isso mudar de política, o único ponto de ajuste é o arquivo `functions/api/analyze.js` — o resto do app não muda.
 
+## Novidades desta atualização: Google Drive, IGDB, PCGamingWiki e Notícias
+
+### Google Drive (sincronização entre dispositivos)
+
+O app agora sincroniza sua biblioteca (jogos, perfis, notas de franquia) num arquivo `compathub-library.json` guardado na sua própria conta do Google Drive, usando o escopo `drive.file` (o app só enxerga o arquivo que ele mesmo cria — não tem acesso ao resto do seu Drive). Resolução de conflito é **last-write-wins**: entre dois dispositivos editando offline, o salvamento mais recente vence.
+
+O Client ID OAuth já está embutido em `src/CompatHub.jsx` (constante `GOOGLE_DRIVE_CLIENT_ID`) — ele não é segredo, é feito pra ficar exposto no client-side. Não precisa configurar nada a mais pra essa parte funcionar; só clicar em "Conectar Drive" no app já publicado.
+
+**Importante — origens autorizadas:** no Google Cloud Console, em Credenciais > seu Client ID > "Origens JavaScript autorizadas", confirme que a URL final do seu deploy (ex: `https://compat-hub.SEU-SUBDOMINIO.workers.dev`) está cadastrada. Se você mudar de domínio depois (domínio próprio, por exemplo), adicione a nova origem lá, senão o login do Drive falha com erro de origem não autorizada.
+
+Como a tela de consentimento OAuth está em modo **Teste**, só e-mails cadastrados em "Usuários de teste" (na mesma tela do Google Cloud Console) conseguem fazer login — isso é intencional pra um app de uso pessoal, não precisa publicar/verificar o app.
+
+### IGDB (capas, sinopse, gêneros, jogos parecidos)
+
+Endpoint novo: `/api/igdb?name=NOME_DO_JOGO`. Pra ativar, gere credenciais grátis em duas etapas:
+
+1. Acesse https://dev.twitch.tv/console/apps → **Register Your Application**
+2. Nome: qualquer um. Categoria: "Application Integration". OAuth Redirect URL: `https://localhost` (não é usado nesse fluxo, mas o campo é obrigatório)
+3. Copie o **Client ID** gerado e clique em "New Secret" pra gerar o **Client Secret**
+4. No painel do Cloudflare (Settings > Variables and Secrets), adicione:
+   - `IGDB_CLIENT_ID` = o Client ID (Plaintext)
+   - `IGDB_CLIENT_SECRET` = o Client Secret (Secret)
+
+Sem essas duas variáveis, o endpoint responde com erro claro em vez de quebrar o resto do app.
+
+### PCGamingWiki (dados técnicos)
+
+Endpoint novo: `/api/pcgamingwiki?name=NOME_EXATO_DA_PAGINA`. Não precisa de chave — é uma consulta pública à extensão Cargo do MediaWiki deles. O `name` precisa bater com o título exato da página no PCGamingWiki (ex: "Cyberpunk 2077"); nomes muito diferentes do título oficial não retornam resultado.
+
+### Notícias (`/api/news`)
+
+Agrega RSS da IGN, Eurogamer e Steam num painel estilo revista (manchete grande + grid de cards), acessível pelo botão "Notícias" no topo do app. Não precisa de nenhuma chave — é leitura pública de RSS. Se uma das três fontes cair ou mudar de URL, as outras continuam funcionando normalmente (falha isolada por fonte, não derruba o painel inteiro).
+
 ## Migrando pra outro host
 
 A arquitetura (frontend estático + 1 Worker que também serve a API) roda igual em Vercel ou Netlify, só muda onde fica o código do backend:

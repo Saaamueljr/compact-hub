@@ -400,6 +400,218 @@ function pickLargestGrid(list) {
   return [...list].sort((a, b) => (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0))[0];
 }
 
+// --- IGDB (via Twitch OAuth) ---
+// Cache do token de app-access em memória do isolate. Não é garantido
+// persistir entre requisições (Workers podem reciclar o isolate a qualquer
+// momento), mas quando persiste evita repetir o handshake OAuth a cada
+// busca — o token do Twitch dura ~60 dias.
+let igdbTokenCache = { token: null, expiresAt: 0 };
+
+async function getIgdbToken(env) {
+  const clientId = env.IGDB_CLIENT_ID;
+  const clientSecret = env.IGDB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error("IGDB_CLIENT_ID / IGDB_CLIENT_SECRET não configurados no servidor.");
+  }
+
+  if (igdbTokenCache.token && igdbTokenCache.expiresAt > Date.now()) {
+    return igdbTokenCache.token;
+  }
+
+  const url = `https://id.twitch.tv/oauth2/token?client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`;
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`Falha ao autenticar no Twitch/IGDB: ${res.status}`);
+  const data = await res.json();
+  igdbTokenCache = {
+    token: data.access_token,
+    // Renova um pouco antes de expirar de verdade (margem de 5 min).
+    expiresAt: Date.now() + (data.expires_in - 300) * 1000,
+  };
+  return igdbTokenCache.token;
+}
+
+// Busca metadados ricos de um jogo (capa, screenshots, sinopse, gêneros,
+// jogos parecidos) pelo nome. Usado pra enriquecer os cards além da capa
+// simples que já vem do SteamGridDB.
+async function handleIgdbSearch(request, env) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get("name");
+  if (!name) return json({ error: "Falta o parâmetro name." }, 400);
+
+  let token;
+  try {
+    token = await getIgdbToken(env);
+  } catch (e) {
+    return json({ error: e.message }, 500);
+  }
+
+  const clientId = env.IGDB_CLIENT_ID;
+  const escaped = name.replace(/"/g, '\\"');
+  // Apicalypse: pede só os campos que a UI usa, limita a 1 resultado (o
+  // melhor match do próprio IGDB pra busca textual).
+  const body = `search "${escaped}"; fields name,summary,genres.name,first_release_date,cover.url,screenshots.url,similar_games.name; limit 1;`;
+
+  let res;
+  try {
+    res = await fetch("https://api.igdb.com/v4/games", {
+      method: "POST",
+      headers: {
+        "Client-ID": clientId,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "text/plain",
+      },
+      body,
+    });
+  } catch (e) {
+    return json({ error: `Falha ao contatar o IGDB: ${e.message}` }, 502);
+  }
+  if (!res.ok) return json({ error: `IGDB retornou erro ${res.status}.` }, 502);
+
+  const data = await res.json().catch(() => []);
+  const match = data?.[0];
+  if (!match) return json({ error: "Nenhum jogo encontrado no IGDB com esse nome." }, 404);
+
+  // A URL de imagem do IGDB vem em formato //thumb, protocol-relative e em
+  // baixa resolução por padrão — troca pro tamanho grande e completa o https.
+  function bigImage(igdbUrl) {
+    if (!igdbUrl) return null;
+    return `https:${igdbUrl.replace("t_thumb", "t_1080p")}`;
+  }
+
+  return json({
+    name: match.name,
+    summary: match.summary || null,
+    genres: (match.genres || []).map((g) => g.name),
+    releaseDate: match.first_release_date ? match.first_release_date * 1000 : null,
+    coverUrl: bigImage(match.cover?.url),
+    screenshots: (match.screenshots || []).map((s) => bigImage(s.url)).filter(Boolean),
+    similarGames: (match.similar_games || []).map((g) => g.name),
+  });
+}
+
+// --- PCGamingWiki ---
+// Sem OAuth — é um MediaWiki com extensão Cargo, consultado como se fosse
+// uma tabela. Traz dados técnicos que complementam a análise do Gemini com
+// fatos concretos (engine, versão de Direct3D, VRAM mínima etc).
+async function handlePcgamingwiki(request, env) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get("name");
+  if (!name) return json({ error: "Falta o parâmetro name." }, 400);
+
+  const api = new URL("https://www.pcgamingwiki.com/w/api.php");
+  api.searchParams.set("action", "cargoquery");
+  api.searchParams.set("format", "json");
+  api.searchParams.set("tables", "Infobox_game");
+  api.searchParams.set(
+    "fields",
+    "Infobox_game._pageName=Page,Engine,Direct3D_versions,VRAM_min,Steam_input_API,Denuvo"
+  );
+  api.searchParams.set("where", `Infobox_game._pageName="${name.replace(/"/g, '')}"`);
+  api.searchParams.set("limit", "1");
+
+  let res;
+  try {
+    res = await fetch(api, { headers: { "User-Agent": "CompatHub/1.0 (uso pessoal)" } });
+  } catch (e) {
+    return json({ error: `Falha ao contatar o PCGamingWiki: ${e.message}` }, 502);
+  }
+  if (!res.ok) return json({ error: `PCGamingWiki retornou erro ${res.status}.` }, 502);
+
+  const data = await res.json().catch(() => null);
+  const row = data?.cargoquery?.[0]?.title;
+  if (!row) return json({ error: "Página não encontrada no PCGamingWiki com esse nome exato." }, 404);
+
+  return json({
+    page: row.Page || name,
+    engine: row.Engine || null,
+    direct3dVersions: row.Direct3D_versions || null,
+    vramMin: row.VRAM_min || null,
+    steamInputApi: row.Steam_input_API || null,
+    denuvo: row.Denuvo || null,
+    pageUrl: `https://www.pcgamingwiki.com/wiki/${encodeURIComponent((row.Page || name).replace(/ /g, "_"))}`,
+  });
+}
+
+// --- Notícias (RSS agregado, sem chave de API) ---
+// Agrega alguns feeds RSS de sites de games num formato unificado. Parsing
+// feito com regex simples (sem lib de XML) porque RSS 2.0 é bem regular e
+// isso evita adicionar uma dependência só pra isso.
+const NEWS_FEEDS = [
+  { url: "https://www.ign.com/rss/articles/feed", source: "IGN" },
+  { url: "https://www.eurogamer.net/feed", source: "Eurogamer" },
+  { url: "https://store.steampowered.com/feeds/news.xml", source: "Steam" },
+];
+
+function extractTag(xml, tag) {
+  const match = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  if (!match) return null;
+  return match[1]
+    .replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, "$1")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
+function extractImage(itemXml) {
+  const enclosure = itemXml.match(/<enclosure[^>]*url="([^"]+)"[^>]*type="image[^"]*"/i);
+  if (enclosure) return enclosure[1];
+  const mediaContent = itemXml.match(/<media:content[^>]*url="([^"]+)"/i);
+  if (mediaContent) return mediaContent[1];
+  const imgTag = itemXml.match(/<img[^>]+src="([^"]+)"/i);
+  if (imgTag) return imgTag[1];
+  return null;
+}
+
+function parseRssItems(xml, source) {
+  const items = [];
+  const itemMatches = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
+  for (const itemXml of itemMatches.slice(0, 12)) {
+    const title = extractTag(itemXml, "title");
+    const link = extractTag(itemXml, "link");
+    const pubDate = extractTag(itemXml, "pubDate");
+    const description = extractTag(itemXml, "description");
+    if (!title || !link) continue;
+    items.push({
+      title,
+      link,
+      pubDate,
+      description: description ? description.slice(0, 220) : null,
+      image: extractImage(itemXml),
+      source,
+    });
+  }
+  return items;
+}
+
+async function handleNews(request, env) {
+  const results = await Promise.allSettled(
+    NEWS_FEEDS.map(async (feed) => {
+      const res = await fetch(feed.url, {
+        headers: { "User-Agent": "CompatHub/1.0 (uso pessoal, agregador RSS)" },
+      });
+      if (!res.ok) throw new Error(`${feed.source} retornou ${res.status}`);
+      const xml = await res.text();
+      return parseRssItems(xml, feed.source);
+    })
+  );
+
+  const items = [];
+  const feedErrors = [];
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") items.push(...r.value);
+    else feedErrors.push(`${NEWS_FEEDS[i].source}: ${r.reason?.message || "erro desconhecido"}`);
+  });
+
+  // Ordena pelas mais recentes quando dá pra interpretar a data; itens sem
+  // data reconhecida vão pro fim, mas não são descartados.
+  items.sort((a, b) => {
+    const da = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const db = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return (db || 0) - (da || 0);
+  });
+
+  return json({ items, feedErrors: feedErrors.length ? feedErrors : undefined });
+}
+
 // Avatar + pontos/rank da conta do RA — usado SÓ no painel de escolha de
 // perfil de hardware, pro perfil marcado como vinculado ao RA (ver raLinked).
 async function handleRetroAchievementsProfile(request, env) {
@@ -778,6 +990,36 @@ export default {
       }
       if (request.method === "GET") {
         return handleCoverArt(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/igdb") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleIgdbSearch(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/pcgamingwiki") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handlePcgamingwiki(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/news") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleNews(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
