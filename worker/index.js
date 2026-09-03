@@ -609,6 +609,42 @@ async function handleNews(request, env) {
     return (db || 0) - (da || 0);
   });
 
+  // As fontes (IGN, Eurogamer, Steam) publicam em inglês. Traduz título +
+  // resumo pro português numa chamada em lote ao Gemini, no mesmo padrão de
+  // handleTranslateAchievements. Se o Gemini falhar ou não estiver
+  // configurado, devolve as notícias no idioma original em vez de quebrar
+  // o painel — tradução é um "nice to have", não deveria derrubar a feature.
+  const top = items.slice(0, 20);
+  if (top.length > 0 && env.GEMINI_API_KEY) {
+    try {
+      const listForPrompt = top.map((it, i) => ({ id: i, title: it.title, description: it.description }));
+      const systemInstruction = `Você traduz manchetes e resumos de notícias de games do inglês pro português do Brasil.
+Mantenha nomes próprios de jogos, empresas e termos técnicos (ex: "patch", "DLC", "framerate") como estão.
+Responda SOMENTE com um JSON válido (array), sem texto antes ou depois, sem markdown, no formato exato:
+[{"id": 0, "title": "...", "description": "..."}]
+Se "description" for null no item original, mantenha null na resposta.`;
+
+      const result = await callGeminiJSON(env, {
+        systemInstruction,
+        userPrompt: JSON.stringify(listForPrompt),
+        temperature: 0.2,
+        allowGrounding: false,
+      });
+
+      if (result.ok && Array.isArray(result.data)) {
+        for (const t of result.data) {
+          if (top[t.id]) {
+            if (t.title) top[t.id].title = t.title;
+            if (t.description !== undefined) top[t.id].description = t.description;
+          }
+        }
+      }
+    } catch {
+      // segue com o conteúdo original em inglês — melhor mostrar algo do
+      // que derrubar o painel inteiro por causa da tradução
+    }
+  }
+
   return json({ items, feedErrors: feedErrors.length ? feedErrors : undefined });
 }
 

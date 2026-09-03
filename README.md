@@ -123,6 +123,12 @@ Endpoint novo: `/api/pcgamingwiki?name=NOME_EXATO_DA_PAGINA`. Não precisa de ch
 
 Agrega RSS da IGN, Eurogamer e Steam num painel estilo revista (manchete grande + grid de cards), acessível pelo botão "Notícias" no topo do app. Não precisa de nenhuma chave — é leitura pública de RSS. Se uma das três fontes cair ou mudar de URL, as outras continuam funcionando normalmente (falha isolada por fonte, não derruba o painel inteiro).
 
+**Tradução automática:** essas fontes publicam em inglês, então o Worker manda título + resumo de cada notícia pro Gemini traduzir pro português numa única chamada em lote (mesma `GEMINI_API_KEY` que você já configurou pra análise de compatibilidade — não precisa de nenhuma chave nova). Nomes próprios de jogos/empresas e termos técnicos (patch, DLC, framerate) são mantidos como estão. Se o Gemini falhar por qualquer motivo, o painel mostra as notícias no idioma original em vez de quebrar.
+
+### Screenshots na tela de detalhe (via IGDB)
+
+Assim que `IGDB_CLIENT_ID`/`IGDB_CLIENT_SECRET` estiverem configurados (ver seção do IGDB acima), a tela de detalhe de cada jogo passa a carregar uma galeria de screenshots automaticamente, com clique pra abrir em tela cheia. Se o IGDB não tiver aquele jogo ou as credenciais ainda não estiverem configuradas, a seção simplesmente não aparece — não gera erro visível.
+
 ## Migrando pra outro host
 
 A arquitetura (frontend estático + 1 Worker que também serve a API) roda igual em Vercel ou Netlify, só muda onde fica o código do backend:

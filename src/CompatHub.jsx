@@ -2789,6 +2789,93 @@ function GameLoreSection({ game, onApplyLore }) {
   );
 }
 
+// Galeria de screenshots puxada do IGDB. Busca uma vez por jogo (nome como
+// chave), some silenciosamente se não achar nada ou se IGDB_CLIENT_ID/
+// IGDB_CLIENT_SECRET não estiverem configurados no servidor — não é uma
+// feature essencial, não deveria virar um erro visível toda vez.
+function GameScreenshotsSection({ gameName }) {
+  const [screenshots, setScreenshots] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setScreenshots([]);
+    (async () => {
+      try {
+        const res = await fetch(`/api/igdb?name=${encodeURIComponent(gameName)}`);
+        if (!res.ok) return; // sem credenciais configuradas, ou não encontrado — ignora
+        const body = await res.json();
+        if (!cancelled) setScreenshots(body.screenshots || []);
+      } catch {
+        // rede falhou — segue sem screenshots, sem quebrar o resto do card
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [gameName]);
+
+  if (loading || screenshots.length === 0) return null;
+
+  return (
+    <div className="mb-4">
+      <p className="text-xs font-medium text-zinc-500 mb-2">Screenshots</p>
+      <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+        {screenshots.map((url, i) => (
+          <button
+            key={url}
+            onClick={() => setLightboxIndex(i)}
+            className="shrink-0 w-40 aspect-video rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 transition-colors"
+          >
+            <img src={url} alt="" className="w-full h-full object-cover" loading="lazy" />
+          </button>
+        ))}
+      </div>
+
+      {lightboxIndex !== null && (
+        <div
+          className="fixed inset-0 z-40 bg-black/90 flex items-center justify-center p-6"
+          onClick={() => setLightboxIndex(null)}
+        >
+          <img
+            src={screenshots[lightboxIndex]}
+            alt=""
+            className="max-w-full max-h-full rounded-lg"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {screenshots.length > 1 && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((i) => (i - 1 + screenshots.length) % screenshots.length); }}
+                className="absolute left-4 top-1/2 -translate-y-1/2 text-white/80 hover:text-white"
+              >
+                <ChevronLeft className="w-8 h-8" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((i) => (i + 1) % screenshots.length); }}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-white/80 hover:text-white"
+              >
+                <ChevronRight className="w-8 h-8" />
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => setLightboxIndex(null)}
+            className="absolute top-5 right-5 text-white/80 hover:text-white"
+            aria-label="Fechar"
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
   onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
@@ -2989,6 +3076,11 @@ function GameDetailModal({
               onApplyRaData(next);
             }}
           />
+
+          {/* screenshots via IGDB — carrega sozinho, some se IGDB não tiver
+              esse jogo ou se as credenciais ainda não estiverem configuradas
+              no servidor (falha silenciosa, não é uma feature essencial) */}
+          <GameScreenshotsSection gameName={game.name} />
 
           {/* status: quero jogar / jogando / zerado / abandonado */}
           <div className="flex flex-wrap gap-1.5 mb-2">
