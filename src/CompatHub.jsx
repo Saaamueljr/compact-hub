@@ -8,7 +8,8 @@ import {
   Search, Plus, X, RefreshCw, Trash2, Gamepad2, Loader2,
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
-  ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper
+  ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper,
+  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -18,11 +19,18 @@ const STORAGE_KEY = "compat-hub-data";
 // Credenciais > ID do cliente OAuth (tipo "Aplicativo da Web").
 const GOOGLE_DRIVE_CLIENT_ID = "872251667165-n77afe9fcmgt69lmf0b1jmbennij5cho.apps.googleusercontent.com";
 
+// Tamanho do lote por chamada ao Gemini na importação em massa — 20-25
+// jogos por chamada é o equilíbrio escolhido entre confiabilidade da
+// resposta (JSON não trunca) e velocidade (poucas chamadas pra uma
+// biblioteca grande, tipo os +300 jogos da Epic).
+const BULK_IMPORT_BATCH_SIZE = 25;
+const BULK_IMPORT_BATCH_DELAY_MS = 600; // respiro entre chamadas, evita rate limit
+
 const PLATFORMS = [
   { id: "steam", label: "Steam", badge: "bg-sky-900 text-sky-300 border border-sky-700" },
   { id: "epic", label: "Epic Games", badge: "bg-zinc-800 text-zinc-200 border border-zinc-600" },
   { id: "gog", label: "GOG", badge: "bg-purple-900 text-purple-300 border border-purple-700" },
-  { id: "amazon", label: "Amazon Games", badge: "bg-orange-900 text-orange-300 border border-orange-700" },
+  { id: "amazon", label: "Amazon Luna", badge: "bg-orange-900 text-orange-300 border border-orange-700" },
   { id: "retro", label: "Retro / ISO", badge: "bg-emerald-900 text-emerald-300 border border-emerald-700" },
   { id: "other", label: "Outro", badge: "bg-zinc-800 text-zinc-300 border border-zinc-600" },
 ];
@@ -155,6 +163,14 @@ function platformOf(id) {
   return PLATFORMS.find((p) => p.id === id) || PLATFORMS[PLATFORMS.length - 1];
 }
 
+// Rótulo de exibição da plataforma/loja — usa o texto livre digitado pelo
+// usuário quando a plataforma é "Outro" (ex: "Xbox PC/Game Pass"), senão
+// cai no rótulo fixo padrão ("Steam", "Epic Games" etc).
+function platformLabelOf(game) {
+  if (game.platform === "other" && game.platformOther) return game.platformOther;
+  return platformOf(game.platform).label;
+}
+
 function formatDate(iso) {
   try {
     return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
@@ -192,7 +208,7 @@ function steamCoverUrl(appId) {
 // Chama a Function serverless em /api/analyze — a chave do Gemini nunca
 // chega no navegador, fica só no servidor (ver functions/api/analyze.js).
 async function callAnalysis({ profile, game, notesText }) {
-  const platformLabel = platformOf(game.platform).label;
+  const platformLabel = platformLabelOf(game);
 
   const response = await fetch("/api/analyze", {
     method: "POST",
@@ -408,7 +424,7 @@ function listSortValue(game, activeProfileId, key) {
     case "name":
       return game.name.toLowerCase();
     case "platform":
-      return game.raMeta?.consoleName || platformOf(game.platform).label;
+      return game.raMeta?.consoleName || platformLabelOf(game);
     case "achievements":
       return game.raProgress ? game.raProgress.numAwardedToUser / Math.max(1, game.raProgress.numAchievements) : -1;
     case "released":
@@ -424,6 +440,125 @@ function listSortValue(game, activeProfileId, key) {
     default:
       return "";
   }
+}
+
+// Um card do grid — extraído pra função reaproveitável porque agora ele é
+// renderizado tanto no modo "lista flat" quanto dentro de cada seção
+// agrupada por biblioteca (ver GroupedGrid).
+function GameGridCard({ game, activeProfileId, onToggleFavorite, onOpen }) {
+  const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
+  const gameStatus = statusOf(game.status);
+  const variant = frameVariantOf(game);
+  return (
+    <div className="text-left group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-zinc-600 transition-colors relative">
+      <button
+        onClick={(e) => { e.stopPropagation(); onToggleFavorite(game.id); }}
+        className="absolute top-2 left-2 z-30 w-7 h-7 rounded-full bg-black/60 backdrop-blur flex items-center justify-center hover:bg-black/80 transition-colors"
+        aria-label="Favoritar"
+      >
+        <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-300"}`} />
+      </button>
+      <button onClick={() => onOpen(game.id)} className="text-left w-full">
+        <div className="relative">
+          <CoverThumb game={game} frame className="aspect-video group-hover:opacity-90 transition-opacity" />
+          <div className="absolute top-2 right-2 z-30">
+            <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
+          </div>
+        </div>
+        <div className="relative overflow-hidden p-3">
+          {variant && <StarField variant={variant} seed={game.id} count={22} />}
+          <div className="relative z-10">
+            <p className="text-sm font-medium line-clamp-1 flex items-center gap-1.5">
+              {game.name}
+              {game.guideUrl && <BookOpen className="w-3 h-3 text-zinc-500 shrink-0" />}
+            </p>
+            {(game.raProgress || game.runningVia) && (
+              <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500">
+                {game.raProgress && (
+                  <span className="flex items-center gap-1">
+                    <Trophy className="w-3 h-3 text-amber-500" />
+                    {game.raProgress.numAwardedToUser}/{game.raProgress.numAchievements}
+                  </span>
+                )}
+                {game.runningVia && <span className="truncate">{game.runningVia}</span>}
+              </div>
+            )}
+            <div className="flex items-center justify-between mt-2 gap-2">
+              <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
+                {platformLabelOf(game)}
+              </span>
+              {gameStatus && (
+                <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${gameStatus.badge}`}>
+                  {gameStatus.label}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </button>
+      {variant && <CardFrame variant={variant} seed={game.id} rounded="rounded-xl" />}
+    </div>
+  );
+}
+
+// Agrupa uma lista de jogos já filtrada em seções por biblioteca (na ordem
+// de PLATFORMS), cada uma com cabeçalho + contador, colapsável. Só entra em
+// ação quando o filtro de plataforma está em "all" — com uma plataforma
+// específica selecionada não faz sentido repetir o cabeçalho pra um grupo só.
+function useCollapsedLibraries() {
+  const [collapsed, setCollapsed] = useState({});
+  const toggle = (key) => setCollapsed((c) => ({ ...c, [key]: !c[key] }));
+  return [collapsed, toggle];
+}
+
+function LibraryGroupedView({ games, viewMode, activeProfileId, onToggleFavorite, onOpen }) {
+  const [collapsed, toggle] = useCollapsedLibraries();
+
+  const groups = PLATFORMS.map((p) => ({
+    ...p,
+    games: games.filter((g) => (g.platform || "other") === p.id),
+  })).filter((g) => g.games.length > 0);
+
+  // Jogos com plataforma "other" mas com nome customizado (platformOther)
+  // preenchido continuam dentro do grupo "Outro" — sub-agrupar por texto
+  // livre abriria mão da ordem previsível de PLATFORMS por pouco ganho.
+
+  return (
+    <div className="flex flex-col gap-6">
+      {groups.map((group) => {
+        const isCollapsed = !!collapsed[group.id];
+        return (
+          <div key={group.id}>
+            <button
+              onClick={() => toggle(group.id)}
+              className="flex items-center gap-2 mb-3 text-sm font-medium text-zinc-300 hover:text-zinc-100 transition-colors"
+            >
+              {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              <span className={`text-xs px-2 py-0.5 rounded-full ${group.badge}`}>{group.label}</span>
+              <span className="text-zinc-600 text-xs">{group.games.length}</span>
+            </button>
+            {!isCollapsed && (
+              viewMode === "list" ? (
+                <ListView games={group.games} activeProfileId={activeProfileId} onOpen={onOpen} />
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  {group.games.map((game) => (
+                    <GameGridCard
+                      key={game.id}
+                      game={game}
+                      activeProfileId={activeProfileId}
+                      onToggleFavorite={onToggleFavorite}
+                      onOpen={onOpen}
+                    />
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function ListView({ games, activeProfileId, onOpen }) {
@@ -489,7 +624,7 @@ function ListView({ games, activeProfileId, onOpen }) {
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-                      {game.raMeta?.consoleName || platformOf(game.platform).label}
+                      {game.raMeta?.consoleName || platformLabelOf(game)}
                     </span>
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap text-zinc-400">
@@ -552,6 +687,7 @@ export default function CompatHub() {
   const [loaded, setLoaded] = useState(false);
 
   const [query, setQuery] = useState("");
+  const [ownershipTab, setOwnershipTab] = useState("owned"); // "owned" | "wishlist"
   const [platformFilter, setPlatformFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
@@ -561,6 +697,7 @@ export default function CompatHub() {
   const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const [showAdd, setShowAdd] = useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [activeGameId, setActiveGameId] = useState(null);
@@ -774,12 +911,14 @@ export default function CompatHub() {
     persist(profiles, id, games);
   }
 
-  function addGame({ name, platform, steamAppId, coverUrl, raGameId, raIconUrl, raProgress, raMeta }) {
+  function addGame({ name, platform, platformOther, ownership, steamAppId, coverUrl, raGameId, raIconUrl, raProgress, raMeta }) {
     const finalCover = coverUrl?.trim() || steamCoverUrl(steamAppId?.trim());
     const newGame = {
       id: uid(),
       name: name.trim(),
       platform,
+      platformOther: platformOther?.trim() || "",
+      ownership: ownership || "owned",
       steamAppId: steamAppId?.trim() || "",
       coverUrl: finalCover || "",
       goals: "",
@@ -798,6 +937,28 @@ export default function CompatHub() {
     updateGames((prev) => [newGame, ...prev]);
     setShowAdd(false);
     setActiveGameId(newGame.id);
+  }
+
+  function bulkImportGames(newGames) {
+    updateGames((prev) => [...newGames, ...prev]);
+    setShowBulkImport(false);
+    // Busca capa em segundo plano pra cada jogo importado, um de cada vez
+    // com um respiro entre chamadas — não é bloqueante, o usuário já vê a
+    // lista completa na hora, as capas vão preenchendo sozinhas.
+    (async () => {
+      for (const g of newGames) {
+        try {
+          const res = await fetch(`/api/coverart?name=${encodeURIComponent(g.name)}`);
+          if (res.ok) {
+            const body = await res.json();
+            if (body.coverUrl) updateGame(g.id, { coverUrl: body.coverUrl });
+          }
+        } catch {
+          // sem capa pra esse jogo — segue pro próximo, não é crítico
+        }
+        await new Promise((r) => setTimeout(r, 350));
+      }
+    })();
   }
 
   function toggleFavorite(id) {
@@ -859,6 +1020,7 @@ export default function CompatHub() {
   const franchises = Array.from(new Set(games.map((g) => g.franchise).filter(Boolean))).sort();
 
   const filteredGames = games.filter((g) => {
+    const matchesOwnership = (g.ownership || "owned") === ownershipTab;
     const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
     const matchesPlatform = platformFilter === "all" || g.platform === platformFilter;
     const matchesStatus = statusFilter === "all" || g.status === statusFilter;
@@ -870,7 +1032,7 @@ export default function CompatHub() {
     // abaixo do corte de "jogável" nesse hardware específico.
     const latestForProfile = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
     const matchesCompat = !onlyCompatible || !latestForProfile || latestForProfile.tier >= MIN_PLAYABLE_TIER;
-    return matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise && matchesCompat;
+    return matchesOwnership && matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise && matchesCompat;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
@@ -878,7 +1040,9 @@ export default function CompatHub() {
   // Dashboard: contadores simples, calculados só com base no perfil de hardware
   // ativo no momento (uma análise feita no PC Retrô não deveria contar como
   // "excelente" quando você está olhando o perfil do PC Principal).
-  const stats = games.reduce(
+  const stats = games
+    .filter((g) => (g.ownership || "owned") === ownershipTab)
+    .reduce(
     (acc, g) => {
       acc.total += 1;
       const latest = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
@@ -984,6 +1148,36 @@ export default function CompatHub() {
           </button>
           </div>
         </div>
+      </div>
+
+      {/* abas: Meus jogos x Lista de desejos */}
+      <div className="max-w-6xl mx-auto px-5 pt-5 flex items-center gap-2">
+        <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+          <button
+            onClick={() => setOwnershipTab("owned")}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+              ownershipTab === "owned" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Meus jogos
+          </button>
+          <button
+            onClick={() => setOwnershipTab("wishlist")}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+              ownershipTab === "wishlist" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Lista de desejos
+          </button>
+        </div>
+
+        <button
+          onClick={() => setShowBulkImport(true)}
+          className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
+        >
+          <FileSpreadsheet className="w-3.5 h-3.5" />
+          Importar planilha
+        </button>
       </div>
 
       {/* dashboard simples */}
@@ -1174,73 +1368,55 @@ export default function CompatHub() {
             )}
           </div>
         ) : viewMode === "list" ? (
-          <ListView games={filteredGames} activeProfileId={activeProfileId} onOpen={setActiveGameId} />
+          platformFilter === "all" ? (
+            <LibraryGroupedView
+              games={filteredGames}
+              viewMode="list"
+              activeProfileId={activeProfileId}
+              onToggleFavorite={toggleFavorite}
+              onOpen={setActiveGameId}
+            />
+          ) : (
+            <ListView games={filteredGames} activeProfileId={activeProfileId} onOpen={setActiveGameId} />
+          )
+        ) : platformFilter === "all" ? (
+          <LibraryGroupedView
+            games={filteredGames}
+            viewMode="grid"
+            activeProfileId={activeProfileId}
+            onToggleFavorite={toggleFavorite}
+            onOpen={setActiveGameId}
+          />
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-            {filteredGames.map((game) => {
-              const latest = (game.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
-              const gameStatus = statusOf(game.status);
-              const variant = frameVariantOf(game);
-              return (
-                <div
-                  key={game.id}
-                  className="text-left group rounded-xl overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-zinc-600 transition-colors relative"
-                >
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleFavorite(game.id); }}
-                    className="absolute top-2 left-2 z-30 w-7 h-7 rounded-full bg-black/60 backdrop-blur flex items-center justify-center hover:bg-black/80 transition-colors"
-                    aria-label="Favoritar"
-                  >
-                    <Star className={`w-3.5 h-3.5 ${game.favorite ? "fill-amber-400 text-amber-400" : "text-zinc-300"}`} />
-                  </button>
-                  <button onClick={() => setActiveGameId(game.id)} className="text-left w-full">
-                    <div className="relative">
-                      <CoverThumb game={game} frame className="aspect-video group-hover:opacity-90 transition-opacity" />
-                      <div className="absolute top-2 right-2 z-30">
-                        <TierBadge tier={latest?.tier} tierLabel={latest?.tierLabel} />
-                      </div>
-                    </div>
-                    <div className="relative overflow-hidden p-3">
-                      {variant && <StarField variant={variant} seed={game.id} count={22} />}
-                      <div className="relative z-10">
-                        <p className="text-sm font-medium line-clamp-1 flex items-center gap-1.5">
-                          {game.name}
-                          {game.guideUrl && <BookOpen className="w-3 h-3 text-zinc-500 shrink-0" />}
-                        </p>
-                        {(game.raProgress || game.runningVia) && (
-                          <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500">
-                            {game.raProgress && (
-                              <span className="flex items-center gap-1">
-                                <Trophy className="w-3 h-3 text-amber-500" />
-                                {game.raProgress.numAwardedToUser}/{game.raProgress.numAchievements}
-                              </span>
-                            )}
-                            {game.runningVia && <span className="truncate">{game.runningVia}</span>}
-                          </div>
-                        )}
-                        <div className="flex items-center justify-between mt-2 gap-2">
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${platformOf(game.platform).badge}`}>
-                            {platformOf(game.platform).label}
-                          </span>
-                          {gameStatus && (
-                            <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${gameStatus.badge}`}>
-                              {gameStatus.label}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </button>
-                  {variant && <CardFrame variant={variant} seed={game.id} rounded="rounded-xl" />}
-                </div>
-              );
-            })}
+            {filteredGames.map((game) => (
+              <GameGridCard
+                key={game.id}
+                game={game}
+                activeProfileId={activeProfileId}
+                onToggleFavorite={toggleFavorite}
+                onOpen={setActiveGameId}
+              />
+            ))}
           </div>
         )}
       </div>
 
       {/* modal: adicionar jogo */}
-      {showAdd && <AddGameModal games={games} onClose={() => setShowAdd(false)} onAdd={addGame} />}
+      {/* modal: importação em lote via planilha */}
+      {showBulkImport && (
+        <BulkImportModal
+          games={games}
+          profile={profile}
+          defaultOwnership={ownershipTab}
+          onClose={() => setShowBulkImport(false)}
+          onImport={bulkImportGames}
+        />
+      )}
+
+      {showAdd && (
+        <AddGameModal games={games} onClose={() => setShowAdd(false)} onAdd={addGame} defaultOwnership={ownershipTab} />
+      )}
 
       {/* modal: perfis de hardware */}
       {showProfile && (
@@ -1272,6 +1448,7 @@ export default function CompatHub() {
           onAddNote={(text) => addNote(activeGame.id, text)}
           onUpdateGoals={(goals) => updateGame(activeGame.id, { goals })}
           onToggleFavorite={() => toggleFavorite(activeGame.id)}
+          onMarkPurchased={() => updateGame(activeGame.id, { ownership: "owned" })}
           onSetStatus={(status) => setGameStatus(activeGame.id, status)}
           onToggleManualPlatinum={() => updateGame(activeGame.id, { manualPlatinum: !activeGame.manualPlatinum })}
           onUpdateRaGameId={(raGameId) => updateGame(activeGame.id, { raGameId })}
@@ -1729,9 +1906,398 @@ function NewsModal({ onClose }) {
   );
 }
 
-function AddGameModal({ games, onClose, onAdd }) {
+// Importação em lote via planilha (.xlsx/.csv). Fluxo: usuário sobe o
+// arquivo -> escolhe a coluna com o nome do jogo -> escolhe biblioteca +
+// destino (meus jogos/lista de desejos) pra TODO o lote -> revisa a lista
+// (pode desmarcar duplicatas/itens indesejados) -> importa.
+//
+// A análise de compatibilidade roda em lotes de ~20-25 jogos por chamada ao
+// Gemini (ver handleAnalyzeBatch no worker), disparados em sequência — não
+// em paralelo, pra não estourar rate limit da API. Cada lote que falhar não
+// derruba os outros: os jogos daquele lote entram sem análise (dá pra
+// analisar individualmente depois, como qualquer outro jogo da biblioteca).
+const BULK_ANALYSIS_BATCH_SIZE = 22;
+
+function BulkImportModal({ games, profile, defaultOwnership, onClose, onImport }) {
+  const [step, setStep] = useState("upload"); // "upload" | "review" | "importing" | "done"
+  const [fileName, setFileName] = useState("");
+  const [rawRows, setRawRows] = useState([]); // linhas cruas da planilha (array de objetos)
+  const [columns, setColumns] = useState([]);
+  const [titleColumn, setTitleColumn] = useState("");
+  const [parseError, setParseError] = useState("");
+
+  const [platform, setPlatform] = useState("epic");
+  const [platformOther, setPlatformOther] = useState("");
+  const [ownership, setOwnership] = useState(defaultOwnership || "owned");
+  const [runAnalysis, setRunAnalysis] = useState(true);
+
+  const [entries, setEntries] = useState([]); // [{ name, checked, isDuplicate }]
+
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [batchErrors, setBatchErrors] = useState([]);
+  const [importedCount, setImportedCount] = useState(0);
+  const cancelRef = useRef(false);
+
+  const existingNames = useMemo(
+    () => new Set(games.map((g) => g.name.trim().toLowerCase())),
+    [games]
+  );
+
+  async function handleFile(file) {
+    setParseError("");
+    setFileName(file.name);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const firstSheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+      if (rows.length === 0) {
+        setParseError("A planilha não tem nenhuma linha de dados.");
+        return;
+      }
+      const cols = Object.keys(rows[0]);
+      setColumns(cols);
+      // Tenta adivinhar a coluna do título por nomes comuns; senão usa a
+      // primeira coluna — o usuário pode trocar no dropdown de qualquer forma.
+      const guess = cols.find((c) => /^(nome|title|game|jogo|name)/i.test(c.trim())) || cols[0];
+      setTitleColumn(guess);
+      setRawRows(rows);
+    } catch (e) {
+      setParseError(`Não consegui ler essa planilha: ${e.message}`);
+    }
+  }
+
+  function goToReview() {
+    const seen = new Set();
+    const list = rawRows
+      .map((row) => String(row[titleColumn] ?? "").trim())
+      .filter((name) => {
+        if (!name) return false;
+        const key = name.toLowerCase();
+        if (seen.has(key)) return false; // duplicata dentro da própria planilha
+        seen.add(key);
+        return true;
+      })
+      .map((name) => ({
+        name,
+        checked: !existingNames.has(name.toLowerCase()),
+        isDuplicate: existingNames.has(name.toLowerCase()),
+      }));
+    setEntries(list);
+    setStep("review");
+  }
+
+  function toggleEntry(i) {
+    setEntries((prev) => prev.map((e, idx) => (idx === i ? { ...e, checked: !e.checked } : e)));
+  }
+
+  function toggleAll(checked) {
+    setEntries((prev) => prev.map((e) => ({ ...e, checked })));
+  }
+
+  async function runImport() {
+    const selected = entries.filter((e) => e.checked);
+    if (selected.length === 0) return;
+
+    cancelRef.current = false;
+    setStep("importing");
+    setBatchErrors([]);
+    setProgress({ done: 0, total: selected.length });
+
+    const platformLabel = platform === "other" ? (platformOther.trim() || "Outro") : platformOf(platform).label;
+
+    // Monta os jogos primeiro (sem análise), depois preenche análise por
+    // cima em lotes — assim, mesmo se a análise falhar total, os jogos ainda
+    // entram na biblioteca (só sem o tier preenchido ainda).
+    const newGames = selected.map((e) => ({
+      id: uid(),
+      name: e.name,
+      platform,
+      platformOther: platform === "other" ? platformOther.trim() : "",
+      ownership,
+      steamAppId: "",
+      coverUrl: "",
+      goals: "",
+      notes: [],
+      analyses: [],
+      favorite: false,
+      status: null,
+      franchise: "",
+      runningVia: "",
+      raGameId: "",
+      raIconUrl: "",
+      raProgress: null,
+      raMeta: null,
+      createdAt: new Date().toISOString(),
+    }));
+
+    if (runAnalysis) {
+      const errors = [];
+      for (let i = 0; i < newGames.length; i += BULK_ANALYSIS_BATCH_SIZE) {
+        if (cancelRef.current) break;
+        const chunk = newGames.slice(i, i + BULK_ANALYSIS_BATCH_SIZE);
+        try {
+          const res = await fetch("/api/analyze-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              profile,
+              games: chunk.map((g) => ({ name: g.name })),
+              platformLabel,
+            }),
+          });
+          const body = await res.json();
+          if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+          for (const r of body.results || []) {
+            const target = chunk[r.index];
+            if (!target) continue;
+            target.analyses = [
+              {
+                tier: r.tier,
+                tierLabel: r.tierLabel,
+                veredito: r.veredito,
+                motivo: r.motivo,
+                configuracaoRecomendada: r.configuracaoRecomendada,
+                avisos: r.avisos || [],
+                date: new Date().toISOString(),
+                profileId: profile.id,
+                profileName: profile.name,
+              },
+            ];
+          }
+        } catch (e) {
+          errors.push(`Lote ${Math.floor(i / BULK_ANALYSIS_BATCH_SIZE) + 1}: ${e.message}`);
+        }
+        setProgress({ done: Math.min(i + BULK_ANALYSIS_BATCH_SIZE, newGames.length), total: newGames.length });
+      }
+      setBatchErrors(errors);
+    } else {
+      setProgress({ done: newGames.length, total: newGames.length });
+    }
+
+    setImportedCount(newGames.length);
+    onImport(newGames);
+    setStep("done");
+  }
+
+  return (
+    <ModalShell onClose={onClose} maxW="max-w-2xl">
+      <div className="p-6">
+        <h2 className="text-base font-semibold mb-1 flex items-center gap-2">
+          <FileSpreadsheet className="w-5 h-5 text-zinc-400" />
+          Importar planilha
+        </h2>
+        <p className="text-xs text-zinc-500 mb-5">
+          Suba uma lista de jogos (.xlsx, .xls ou .csv) de uma loja/biblioteca de uma vez.
+        </p>
+
+        {step === "upload" && (
+          <>
+            <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-zinc-700 hover:border-zinc-500 rounded-xl py-10 cursor-pointer transition-colors mb-4">
+              <Upload className="w-6 h-6 text-zinc-500" />
+              <span className="text-sm text-zinc-400">
+                {fileName || "Clique pra escolher o arquivo"}
+              </span>
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+              />
+            </label>
+
+            {parseError && (
+              <p className="flex items-start gap-1.5 text-xs text-red-300 mb-4">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                {parseError}
+              </p>
+            )}
+
+            {columns.length > 0 && (
+              <>
+                <label className="text-xs text-zinc-400 mb-1 block">
+                  Qual coluna tem o nome do jogo? ({rawRows.length} linhas encontradas)
+                </label>
+                <select
+                  value={titleColumn}
+                  onChange={(e) => setTitleColumn(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-5 outline-none"
+                >
+                  {columns.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+
+                <label className="text-xs text-zinc-400 mb-1 block">Biblioteca desses jogos</label>
+                <select
+                  value={platform}
+                  onChange={(e) => setPlatform(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-4 outline-none"
+                >
+                  {PLATFORMS.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
+
+                {platform === "other" && (
+                  <input
+                    value={platformOther}
+                    onChange={(e) => setPlatformOther(e.target.value)}
+                    placeholder="ex: Xbox PC / Game Pass, Ubisoft Connect, EA App..."
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-4 outline-none focus:border-indigo-600"
+                  />
+                )}
+
+                <label className="text-xs text-zinc-400 mb-1 block">Vão pra</label>
+                <div className="flex bg-zinc-950 border border-zinc-800 rounded-lg p-1 mb-4">
+                  <button
+                    type="button"
+                    onClick={() => setOwnership("owned")}
+                    className={`flex-1 rounded-md text-sm py-1.5 transition-colors ${
+                      ownership === "owned" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    Meus jogos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOwnership("wishlist")}
+                    className={`flex-1 rounded-md text-sm py-1.5 transition-colors ${
+                      ownership === "wishlist" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    <ShoppingCart className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                    Lista de desejos
+                  </button>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm text-zinc-300 mb-6 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={runAnalysis}
+                    onChange={(e) => setRunAnalysis(e.target.checked)}
+                    className="accent-indigo-600"
+                  />
+                  Já analisar compatibilidade com {profile?.name || "o perfil ativo"} ao importar
+                </label>
+
+                <button
+                  onClick={goToReview}
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-sm font-medium rounded-lg py-2.5"
+                >
+                  Revisar {rawRows.length} jogos
+                </button>
+              </>
+            )}
+          </>
+        )}
+
+        {step === "review" && (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm text-zinc-300">
+                {entries.filter((e) => e.checked).length} de {entries.length} selecionados
+              </p>
+              <div className="flex gap-3 text-xs">
+                <button onClick={() => toggleAll(true)} className="text-indigo-400 hover:text-indigo-300">Marcar todos</button>
+                <button onClick={() => toggleAll(false)} className="text-zinc-500 hover:text-zinc-300">Desmarcar todos</button>
+              </div>
+            </div>
+
+            <div className="max-h-80 overflow-y-auto border border-zinc-800 rounded-lg divide-y divide-zinc-800 mb-5">
+              {entries.map((e, i) => (
+                <label
+                  key={`${e.name}-${i}`}
+                  className="flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-zinc-900/60 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={e.checked}
+                    onChange={() => toggleEntry(i)}
+                    className="accent-indigo-600 shrink-0"
+                  />
+                  <span className="flex-1 truncate text-zinc-200">{e.name}</span>
+                  {e.isDuplicate && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-900/40 text-amber-300 border border-amber-800 shrink-0">
+                      já existe
+                    </span>
+                  )}
+                </label>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStep("upload")}
+                className="flex-1 border border-zinc-800 hover:border-zinc-600 text-zinc-300 text-sm font-medium rounded-lg py-2.5 transition-colors"
+              >
+                Voltar
+              </button>
+              <button
+                onClick={runImport}
+                disabled={entries.filter((e) => e.checked).length === 0}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 transition-colors text-white text-sm font-medium rounded-lg py-2.5"
+              >
+                Importar {entries.filter((e) => e.checked).length} jogos
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === "importing" && (
+          <div className="flex flex-col items-center justify-center gap-4 py-10">
+            <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
+            <p className="text-sm text-zinc-300">
+              {runAnalysis ? "Analisando compatibilidade..." : "Importando..."}
+            </p>
+            {progress.total > 0 && (
+              <div className="w-full max-w-xs">
+                <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500 transition-all"
+                    style={{ width: `${(progress.done / progress.total) * 100}%` }}
+                  />
+                </div>
+                <p className="text-xs text-zinc-500 text-center mt-2">{progress.done}/{progress.total}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === "done" && (
+          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+            <CheckCircle2 className="w-10 h-10 text-emerald-400" />
+            <p className="text-sm text-zinc-200">
+              {importedCount} {importedCount === 1 ? "jogo importado" : "jogos importados"}
+              {ownership === "wishlist" ? " pra lista de desejos" : ""}.
+            </p>
+            {batchErrors.length > 0 && (
+              <div className="text-xs text-amber-300 bg-amber-950/40 border border-amber-900 rounded-lg px-4 py-3 text-left mt-2 max-w-sm">
+                <p className="font-medium mb-1">Alguns lotes falharam na análise (os jogos entraram sem tier, pode analisar depois individualmente):</p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  {batchErrors.map((err, i) => <li key={i}>{err}</li>)}
+                </ul>
+              </div>
+            )}
+            <button
+              onClick={onClose}
+              className="mt-3 bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-sm font-medium rounded-lg px-6 py-2"
+            >
+              Fechar
+            </button>
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+function AddGameModal({ games, onClose, onAdd, defaultOwnership = "owned" }) {
   const [name, setName] = useState("");
   const [platform, setPlatform] = useState("steam");
+  const [platformOther, setPlatformOther] = useState("");
+  const [ownership, setOwnership] = useState(defaultOwnership);
   const [steamAppId, setSteamAppId] = useState("");
   const [coverUrl, setCoverUrl] = useState("");
   const [searchingCover, setSearchingCover] = useState(false);
@@ -1830,6 +2396,40 @@ function AddGameModal({ games, onClose, onAdd }) {
           ))}
         </select>
 
+        {platform === "other" && (
+          <>
+            <label className="text-xs text-zinc-400 mb-1 block">Nome da loja/launcher</label>
+            <input
+              value={platformOther}
+              onChange={(e) => setPlatformOther(e.target.value)}
+              placeholder="ex: Xbox PC / Game Pass, Ubisoft Connect, EA App..."
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm mb-4 outline-none focus:border-indigo-600"
+            />
+          </>
+        )}
+
+        <label className="text-xs text-zinc-400 mb-1 block">Onde ele fica</label>
+        <div className="flex bg-zinc-950 border border-zinc-800 rounded-lg p-1 mb-4">
+          <button
+            type="button"
+            onClick={() => setOwnership("owned")}
+            className={`flex-1 rounded-md text-sm py-1.5 transition-colors ${
+              ownership === "owned" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Meus jogos
+          </button>
+          <button
+            type="button"
+            onClick={() => setOwnership("wishlist")}
+            className={`flex-1 rounded-md text-sm py-1.5 transition-colors ${
+              ownership === "wishlist" ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Lista de desejos
+          </button>
+        </div>
+
         {platform === "steam" && (
           <>
             <label className="text-xs text-zinc-400 mb-1 block">Steam App ID (opcional, puxa a capa automaticamente)</label>
@@ -1915,6 +2515,8 @@ function AddGameModal({ games, onClose, onAdd }) {
             onClick={() => onAdd({
               name,
               platform,
+              platformOther: platform === "other" ? platformOther : "",
+              ownership,
               steamAppId,
               coverUrl: raData?.boxArtUrl || coverUrl,
               raGameId: raData ? raGameId : "",
@@ -2646,7 +3248,7 @@ function FranchiseOrderSection({ franchise, games, cached, onSave }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           franchise,
-          games: siblings.map((g) => ({ name: g.name, platformLabel: platformOf(g.platform).label })),
+          games: siblings.map((g) => ({ name: g.name, platformLabel: platformLabelOf(g) })),
         }),
       });
       const body = await res.json();
@@ -2739,7 +3341,7 @@ function GameLoreSection({ game, onApplyLore }) {
       const res = await fetch("/api/game-lore", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: game.name, platformLabel: platformOf(game.platform).label }),
+        body: JSON.stringify({ name: game.name, platformLabel: platformLabelOf(game) }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
@@ -2892,7 +3494,7 @@ function GameScreenshotsSection({ gameName }) {
 
 function GameDetailModal({
   game, games = [], analyzing, error, activeProfileId, activeProfileName, profiles,
-  onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onSetStatus, onToggleManualPlatinum,
+  onClose, onAnalyze, onAddNote, onUpdateGoals, onToggleFavorite, onMarkPurchased, onSetStatus, onToggleManualPlatinum,
   onUpdateRaGameId, onUpdateRunningVia, onUpdateFranchise, onUpdateName, onUpdatePlatform, onUpdatePlaytime, onUpdateGuideUrl, onSaveTranslations, onApplyRaData,
   franchiseNotes, onUpdateFranchiseNotes,
   onRemove,
@@ -3055,6 +3657,16 @@ function GameDetailModal({
               )}
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {game.ownership === "wishlist" && (
+                <button
+                  onClick={onMarkPurchased}
+                  className="flex items-center gap-1.5 text-xs font-medium bg-emerald-900/40 text-emerald-300 border border-emerald-700 hover:bg-emerald-900/70 rounded-full px-3 py-1 transition-colors"
+                  title="Move este jogo da lista de desejos pra 'Meus jogos'"
+                >
+                  <ShoppingCart className="w-3.5 h-3.5" />
+                  Comprei
+                </button>
+              )}
               <button
                 onClick={onToggleFavorite}
                 className="w-7 h-7 rounded-full bg-zinc-950 border border-zinc-800 flex items-center justify-center hover:border-zinc-600 transition-colors"

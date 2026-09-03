@@ -131,7 +131,34 @@ Agrega RSS da IGN, Eurogamer e Steam num painel estilo revista (manchete grande 
 
 Assim que `IGDB_CLIENT_ID`/`IGDB_CLIENT_SECRET` estiverem configurados (ver seção do IGDB acima), a tela de detalhe de cada jogo passa a carregar uma galeria de screenshots automaticamente, com clique pra abrir em tela cheia. Se o IGDB não tiver aquele jogo ou as credenciais ainda não estiverem configuradas, a seção simplesmente não aparece — não gera erro visível.
 
-## Migrando pra outro host
+## Novidades desta atualização: bibliotecas, lista de desejos e importação em lote
+
+### Bibliotecas (Steam, Epic, GOG, Amazon Luna, Retro/ISO, Outro)
+
+A biblioteca de jogos ("Meus jogos") e a lista de desejos agora são **agrupadas visualmente por biblioteca** — cada seção mostra o nome da loja/launcher, quantos jogos tem, e pode ser recolhida clicando no cabeçalho. Isso é automático sempre que o filtro de plataforma estiver em "Todas"; escolhendo uma plataforma específica no filtro, volta a mostrar só aquela lista flat (sem repetir o cabeçalho de um grupo só).
+
+"Outro" continua aceitando texto livre (Xbox PC/Game Pass, Ubisoft Connect, EA App, ou qualquer launcher que você use) — não precisa que eu adicione um id novo pra cada loja nova que aparecer.
+
+### Lista de desejos + botão "Comprei"
+
+Já existia a estrutura de `ownership` (owned/wishlist) e o botão "Comprei" na tela de detalhe do jogo — ele move o jogo da lista de desejos pra "Meus jogos" mantendo todo o histórico (notas, análises, capa). O que faltava era só a organização por biblioteca, que já está descrita acima.
+
+### Importação em lote via planilha (`/api/analyze-batch`)
+
+Botão "Importar planilha" no topo do app. Fluxo:
+
+1. Sobe um `.xlsx`, `.xls` ou `.csv` com uma coluna de nomes de jogos (o app tenta adivinhar a coluna certa, mas dá pra trocar)
+2. Escolhe a biblioteca e se vai pra "Meus jogos" ou "Lista de desejos" — vale pra toda a planilha de uma vez (pra misturar bibliotecas diferentes, importe a planilha de cada loja separadamente)
+3. Revisa a lista antes de confirmar — duplicatas com jogos que você já tem ficam marcadas e desmarcadas por padrão, mas dá pra forçar a importação mesmo assim
+4. Se marcar "já analisar compatibilidade", o app manda os jogos em lotes de **22 por chamada** ao Gemini (dá pra importar seus 300+ jogos da Epic numa única operação — por trás são só ~14 chamadas em sequência, não 300)
+
+**Por que não manda tudo numa chamada só:** o Gemini tem limite de tokens de saída, e uma resposta JSON muito longa corre risco real de vir cortada no meio (o que quebraria a importação inteira, não só o último item). Lotes de ~20-25 é o equilíbrio testado entre poucas chamadas e resposta confiável.
+
+Se um lote específico falhar (rede, sobrecarga do Gemini etc.), só aquele lote fica sem análise — os jogos ainda entram na biblioteca normalmente, e dá pra analisar individualmente depois, como qualquer outro jogo. O painel final mostra um aviso se algum lote falhou.
+
+Assim que os jogos entram na biblioteca, a busca de capa (SteamGridDB) roda sozinha em segundo plano pra cada um, igual já acontecia antes com a importação em lote.
+
+
 
 A arquitetura (frontend estático + 1 Worker que também serve a API) roda igual em Vercel ou Netlify, só muda onde fica o código do backend:
 - Vercel: crie `api/analyze.js` no formato de handler do Vercel (`export default async function handler(req, res) {...}`) usando a mesma lógica de `worker/index.js`

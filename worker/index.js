@@ -194,6 +194,76 @@ Objetivos do usuário para este jogo: ${game.goals || "nenhum especificado"}`;
   });
 }
 
+// Igual ao handleAnalyze, mas pra um LOTE de jogos numa chamada só —
+// usado na importação em massa via planilha (ver BulkImportModal no
+// front). Sem grounding (busca): com dezenas de jogos por lote, permitir
+// grounding deixaria a resposta lenta/instável demais pra pouco ganho de
+// precisão. Cada jogo do lote é referenciado por índice (0..n-1) — mais
+// seguro que casar por nome, que pode vir levemente diferente na resposta.
+async function handleAnalyzeBatch(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "Corpo da requisição inválido." }, 400);
+  }
+
+  const { profile, games, platformLabel } = payload || {};
+  if (!profile || !Array.isArray(games) || games.length === 0) {
+    return json({ error: "Faltam os jogos ou o perfil de hardware." }, 400);
+  }
+  if (games.length > 30) {
+    return json({ error: "Lote grande demais (máximo 30 jogos por chamada)." }, 400);
+  }
+
+  const systemInstruction = `Você é um analisador técnico de compatibilidade de jogos de PC. Avalie CADA jogo da lista informada nesta configuração:
+
+CPU: ${profile.cpu}
+GPU: ${profile.gpu}
+RAM: ${profile.ram}
+Sistema operacional: ${profile.os}
+
+Preferências gerais do usuário: ${profile.preferences || "não informado"}
+
+Considere sempre:
+- Se a CPU não suporta AVX/AVX2 (comum em CPUs de até ~2011 como Core 2 Quad), jogos que exigem essas instruções não vão abrir, não importa a GPU.
+- Se a GPU tem pouca VRAM, jogos de ~2016 em diante (remasters/remakes inclusos) costumam sofrer stutter, pop-in de textura ou travamento mesmo em configuração baixa quando a VRAM mínima recomendada é maior que a disponível.
+- Remasters/remakes recentes de jogos antigos costumam ter requisitos bem mais altos que a versão original.
+- Baseie-se no seu conhecimento de requisitos de sistema; não há busca disponível nesta chamada em lote, então seja conservador quando não tiver certeza.
+
+Responda SOMENTE com um JSON válido (array), sem texto antes ou depois, sem markdown, sem crases. Um item por jogo da lista, NA MESMA ORDEM E QUANTIDADE que a lista de entrada, no formato exato:
+[{
+  "index": <mesmo índice do jogo na lista de entrada>,
+  "tier": <1 a 6, sendo 6 excelente e 1 não roda>,
+  "tierLabel": "Excelente|Bom|OK|Jogável|Ruim|Não roda",
+  "veredito": "uma frase direta",
+  "motivo": "1 a 2 frases explicando o porquê",
+  "configuracaoRecomendada": "sugestão curta de configuração gráfica",
+  "avisos": ["aviso curto, se houver"]
+}]
+
+Escala de tier:
+6 = Excelente (roda liso, configuração alta)
+5 = Bom (roda bem, configuração média/alta)
+4 = OK (roda de forma estável, configuração média/baixa, sem grandes ressalvas)
+3 = Jogável (roda, mas capenga)
+2 = Ruim (abre e roda, mas a experiência é ruim a ponto de não valer a pena)
+1 = Não roda (trava, crash constante, ou requisito mínimo que a configuração não atende)`;
+
+  const userPrompt = `Plataforma/loja de todos os jogos desta lista: ${platformLabel || "não informado"}
+Lista de jogos (avalie TODOS, na ordem):
+${games.map((g, i) => `${i}: ${g.name}`).join("\n")}`;
+
+  const result = await callGeminiJSON(env, { systemInstruction, userPrompt, temperature: 0.3, allowGrounding: false });
+  if (!result.ok) return json({ error: result.error }, result.status);
+
+  if (!Array.isArray(result.data)) {
+    return json({ error: "O Gemini não devolveu uma lista válida pra este lote." }, 502);
+  }
+
+  return json({ results: result.data });
+}
+
 // Resumo/lore + metadados básicos de UM jogo, gerado por IA (mesmo padrão de
 // busca+fallback do handleAnalyze). Serve pra QUALQUER jogo, de qualquer
 // plataforma — diferente do RetroAchievements, que só cobre jogos com
@@ -956,6 +1026,16 @@ export default {
       }
       if (request.method === "POST") {
         return handleAnalyze(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/analyze-batch") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "POST") {
+        return handleAnalyzeBatch(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
