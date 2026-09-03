@@ -96,6 +96,8 @@ Enquanto o uso ficar dentro do tier gratuito do Gemini (na casa de milhares de c
 
 O app agora sincroniza sua biblioteca (jogos, perfis, notas de franquia) num arquivo `compathub-library.json` guardado na sua própria conta do Google Drive, usando o escopo `drive.file` (o app só enxerga o arquivo que ele mesmo cria — não tem acesso ao resto do seu Drive). Resolução de conflito é **last-write-wins**: entre dois dispositivos editando offline, o salvamento mais recente vence.
 
+**Sobre a sessão ficar conectada:** o login fica salvo em `localStorage`, então fechar e reabrir o app/aba não desconecta mais. O que ainda desconecta é a expiração natural do token do Google (~1h de duração, limitação do fluxo OAuth sem backend usado aqui) — quando isso acontece, o app volta sozinho pro botão "Conectar Drive" sem mostrar erro, é só clicar de novo.
+
 O Client ID OAuth já está embutido em `src/CompatHub.jsx` (constante `GOOGLE_DRIVE_CLIENT_ID`) — ele não é segredo, é feito pra ficar exposto no client-side. Não precisa configurar nada a mais pra essa parte funcionar; só clicar em "Conectar Drive" no app já publicado.
 
 **Importante — origens autorizadas:** no Google Cloud Console, em Credenciais > seu Client ID > "Origens JavaScript autorizadas", confirme que a URL final do seu deploy (ex: `https://compat-hub.SEU-SUBDOMINIO.workers.dev`) está cadastrada. Se você mudar de domínio depois (domínio próprio, por exemplo), adicione a nova origem lá, senão o login do Drive falha com erro de origem não autorizada.

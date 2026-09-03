@@ -625,9 +625,10 @@ export default function CompatHub() {
   }, []);
 
   // Tenta restaurar uma sessão de Drive já autorizada anteriormente (o token
-  // do Google dura ~1h e fica em sessionStorage — ver driveSync.js). Se
-  // existir, puxa o snapshot mais recente do Drive por cima do que acabou de
-  // carregar do localStorage (o Drive é a fonte de verdade quando conectado).
+  // do Google dura ~1h e fica em localStorage — ver driveSync.js, sobrevive
+  // a fechar o app). Se existir e ainda for válido, puxa o snapshot mais
+  // recente do Drive por cima do que acabou de carregar do localStorage (o
+  // Drive é a fonte de verdade quando conectado).
   useEffect(() => {
     if (!loaded) return;
     (async () => {
@@ -661,14 +662,28 @@ export default function CompatHub() {
       if (data) applyLoadedData(data);
       setDriveStatus("connected");
     } catch (e) {
-      setDriveStatus("error");
-      setDriveError(e?.message || "Falha ao conectar com o Google Drive.");
+      handleDriveError(e);
     }
   }
 
   function disconnectDrive() {
     driveSync.signOut();
     setDriveStatus("disconnected");
+  }
+
+  // Sessão expirada (token do Google vencido, ~1h) é um caso normal de uso,
+  // não um "erro" de verdade — trata separado, voltando pro estado limpo
+  // "desconectado" (botão "Conectar Drive") em vez de mostrar um erro que
+  // faz parecer que algo quebrou.
+  function handleDriveError(e) {
+    const message = e?.message || "";
+    if (message.startsWith("SESSION_EXPIRED")) {
+      setDriveStatus("disconnected");
+      setDriveError("");
+    } else {
+      setDriveStatus("error");
+      setDriveError(message || "Falha ao sincronizar com o Google Drive.");
+    }
   }
 
   // Evento da semana (Achievement of the Week) e perfil da conta do RA —
@@ -717,8 +732,7 @@ export default function CompatHub() {
         setDriveStatus("connected");
       } catch (e) {
         console.error("Erro ao sincronizar com o Drive:", e);
-        setDriveStatus("error");
-        setDriveError(e?.message || "Falha ao sincronizar com o Google Drive.");
+        handleDriveError(e);
       }
     }, 1500);
   }

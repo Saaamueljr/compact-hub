@@ -14,6 +14,9 @@ const FILE_NAME = "compathub-library.json";
 const MIME_TYPE = "application/json";
 const SCOPES = "https://www.googleapis.com/auth/drive.file";
 const TOKEN_STORAGE_KEY = "compathub-drive-token";
+// Margem de segurança: trata o token como expirado um pouco antes da hora
+// real, pra nunca tentar usar um token que expira no meio de uma chamada.
+const EXPIRY_SAFETY_MARGIN_MS = 60 * 1000;
 
 class DriveSync {
   constructor() {
@@ -49,14 +52,22 @@ class DriveSync {
       callback: () => {},
     });
 
-    // Tenta restaurar um token salvo nesta sessão do navegador (evita pedir
-    // login de novo a cada refresh — o token do GIS dura ~1h, então isso só
-    // ajuda dentro da mesma sessão, não entre dias).
+    // Restaura um token salvo em localStorage (sobrevive a fechar o
+    // app/aba — ao contrário de sessionStorage). Só restaura se ainda não
+    // tiver expirado; token vencido é descartado pra não fingir "conectado"
+    // e falhar na primeira chamada real ao Drive.
     try {
-      const saved = sessionStorage.getItem(TOKEN_STORAGE_KEY);
-      if (saved) this.accessToken = saved;
+      const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved?.token && saved?.expiresAt > Date.now() + EXPIRY_SAFETY_MARGIN_MS) {
+          this.accessToken = saved.token;
+        } else {
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+        }
+      }
     } catch {
-      // sessionStorage indisponível — segue sem restaurar
+      // localStorage indisponível ou corrompido — segue sem restaurar
     }
   }
 
@@ -69,9 +80,10 @@ class DriveSync {
         if (response.error) return reject(response);
         this.accessToken = response.access_token;
         try {
-          sessionStorage.setItem(TOKEN_STORAGE_KEY, response.access_token);
+          const expiresAt = Date.now() + (response.expires_in || 3600) * 1000;
+          localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token: response.access_token, expiresAt }));
         } catch {
-          // ignora — só perde a persistência entre refreshes
+          // ignora — só perde a persistência entre reaberturas do app
         }
         resolve(response.access_token);
       };
@@ -86,7 +98,7 @@ class DriveSync {
     this.accessToken = null;
     this.fileId = null;
     try {
-      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
     } catch {
       // ignora
     }
@@ -101,6 +113,21 @@ class DriveSync {
     return { Authorization: `Bearer ${this.accessToken}`, ...extra };
   }
 
+  // Se o token expirou no meio do uso (~1h), o Google responde 401. Limpa o
+  // estado local e sinaliza isso de forma distinguível, pra quem chama saber
+  // que é "sessão expirada, precisa reconectar" e não um erro genérico.
+  _checkAuthError(res) {
+    if (res.status === 401) {
+      this.accessToken = null;
+      try {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+      } catch {
+        // ignora
+      }
+      throw new Error("SESSION_EXPIRED: sua sessão do Google Drive expirou, reconecte.");
+    }
+  }
+
   async _findFileId() {
     if (this.fileId) return this.fileId;
 
@@ -110,6 +137,7 @@ class DriveSync {
     url.searchParams.set("fields", "files(id,name,modifiedTime)");
 
     const res = await fetch(url, { headers: this._authHeaders() });
+    this._checkAuthError(res);
     if (!res.ok) throw new Error(`Erro ao buscar arquivo no Drive: ${res.status}`);
     const data = await res.json();
 
@@ -128,6 +156,7 @@ class DriveSync {
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
       { headers: this._authHeaders() }
     );
+    this._checkAuthError(res);
     if (!res.ok) throw new Error(`Erro ao ler arquivo do Drive: ${res.status}`);
     return res.json();
   }
@@ -149,6 +178,7 @@ class DriveSync {
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
       { method: "POST", headers: this._authHeaders(), body: form }
     );
+    this._checkAuthError(res);
     if (!res.ok) throw new Error(`Erro ao criar arquivo no Drive: ${res.status}`);
     const data = await res.json();
     this.fileId = data.id;
@@ -164,6 +194,7 @@ class DriveSync {
         body: JSON.stringify(payload),
       }
     );
+    this._checkAuthError(res);
     if (!res.ok) throw new Error(`Erro ao atualizar arquivo no Drive: ${res.status}`);
     return payload;
   }
