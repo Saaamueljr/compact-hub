@@ -131,6 +131,8 @@ Agrega RSS da IGN, Eurogamer e Steam num painel estilo revista (manchete grande 
 
 Assim que `IGDB_CLIENT_ID`/`IGDB_CLIENT_SECRET` estiverem configurados (ver seção do IGDB acima), a tela de detalhe de cada jogo passa a carregar uma galeria de screenshots automaticamente, com clique pra abrir em tela cheia. Se o IGDB não tiver aquele jogo ou as credenciais ainda não estiverem configuradas, a seção simplesmente não aparece — não gera erro visível.
 
+**Vídeos de gameplay/trailer:** o mesmo endpoint `/api/igdb` agora também traz vídeos (IDs de vídeo do YouTube cadastrados no IGDB pra aquele jogo). Quando tem os dois, aparece uma aba "Screenshots" / "Vídeos" na tela de detalhe; clicar num vídeo abre o player do YouTube embutido, sem sair do app. Nem todo jogo tem vídeo cadastrado no IGDB — quando não tem, a aba simplesmente não aparece.
+
 ## Novidades desta atualização: bibliotecas, lista de desejos e importação em lote
 
 ### Bibliotecas (Steam, Epic, GOG, Amazon Luna, Retro/ISO, Outro)
@@ -157,6 +159,12 @@ Botão "Importar planilha" no topo do app. Fluxo:
 Se um lote específico falhar (rede, sobrecarga do Gemini etc.), só aquele lote fica sem análise — os jogos ainda entram na biblioteca normalmente, e dá pra analisar individualmente depois, como qualquer outro jogo. O painel final mostra um aviso se algum lote falhou.
 
 Assim que os jogos entram na biblioteca, a busca de capa (SteamGridDB) roda sozinha em segundo plano pra cada um, igual já acontecia antes com a importação em lote.
+
+### Remover duplicados
+
+Botão "Remover duplicados" no topo. Detecta grupos de jogos com **mesmo nome + mesma biblioteca + mesmo destino** (meus jogos/lista de desejos) — duplicata típica de importar a mesma planilha duas vezes. Em cada grupo, prioriza manter a cópia que **já tem análise da IA** (se mais de uma tiver, mantém a mais completa: mais análises, capa preenchida, notas, progresso do RetroAchievements); as outras cópias do mesmo grupo são removidas. Mostra uma prévia de tudo que vai ser mantido/removido antes de confirmar — nada é apagado sem você ver a lista primeiro.
+
+Importante: mesmo nome em **bibliotecas diferentes** (ex: o mesmo jogo na Steam e na Epic) não conta como duplicata — isso é legítimo, muita gente tem o mesmo jogo em mais de uma loja.
 
 
 

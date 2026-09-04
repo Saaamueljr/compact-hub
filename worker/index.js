@@ -519,7 +519,7 @@ async function handleIgdbSearch(request, env) {
   const escaped = name.replace(/"/g, '\\"');
   // Apicalypse: pede só os campos que a UI usa, limita a 1 resultado (o
   // melhor match do próprio IGDB pra busca textual).
-  const body = `search "${escaped}"; fields name,summary,genres.name,first_release_date,cover.url,screenshots.url,similar_games.name; limit 1;`;
+  const body = `search "${escaped}"; fields name,summary,genres.name,first_release_date,cover.url,screenshots.url,videos.name,videos.video_id,similar_games.name; limit 1;`;
 
   let res;
   try {
@@ -555,6 +555,11 @@ async function handleIgdbSearch(request, env) {
     releaseDate: match.first_release_date ? match.first_release_date * 1000 : null,
     coverUrl: bigImage(match.cover?.url),
     screenshots: (match.screenshots || []).map((s) => bigImage(s.url)).filter(Boolean),
+    // videos do IGDB são referências a IDs de vídeo do YouTube — não vem o
+    // vídeo em si, só o ID. Front monta a thumb e o embed a partir disso.
+    videos: (match.videos || [])
+      .filter((v) => v.video_id)
+      .map((v) => ({ title: v.name || match.name, youtubeId: v.video_id })),
     similarGames: (match.similar_games || []).map((g) => g.name),
   });
 }

@@ -9,7 +9,7 @@ import {
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
   ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper,
-  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2
+  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -698,6 +698,7 @@ export default function CompatHub() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [showDedupe, setShowDedupe] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [activeGameId, setActiveGameId] = useState(null);
@@ -1172,8 +1173,16 @@ export default function CompatHub() {
         </div>
 
         <button
-          onClick={() => setShowBulkImport(true)}
+          onClick={() => setShowDedupe(true)}
           className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
+        >
+          <Layers className="w-3.5 h-3.5" />
+          Remover duplicados
+        </button>
+
+        <button
+          onClick={() => setShowBulkImport(true)}
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
         >
           <FileSpreadsheet className="w-3.5 h-3.5" />
           Importar planilha
@@ -1403,6 +1412,18 @@ export default function CompatHub() {
       </div>
 
       {/* modal: adicionar jogo */}
+      {/* modal: remover jogos duplicados */}
+      {showDedupe && (
+        <DedupeModal
+          games={games}
+          onClose={() => setShowDedupe(false)}
+          onRemove={(idsToRemove) => {
+            updateGames((prev) => prev.filter((g) => !idsToRemove.includes(g.id)));
+            setShowDedupe(false);
+          }}
+        />
+      )}
+
       {/* modal: importação em lote via planilha */}
       {showBulkImport && (
         <BulkImportModal
@@ -1901,6 +1922,122 @@ function NewsModal({ onClose }) {
             Algumas fontes falharam ao carregar: {feedErrors.join(" · ")}
           </p>
         )}
+      </div>
+    </ModalShell>
+  );
+}
+
+// Pontua um jogo pra decidir qual cópia manter dentro de um grupo de
+// duplicados: ter análise da IA pesa muito mais que qualquer outro critério
+// (é o que o usuário pediu pra priorizar), o resto é só desempate.
+function dedupeScore(game) {
+  let score = (game.analyses?.length || 0) * 100;
+  if (game.coverUrl) score += 10;
+  if (game.notes?.length) score += 5;
+  if (game.raProgress) score += 5;
+  if (game.favorite) score += 1;
+  if (game.status) score += 1;
+  return score;
+}
+
+// Chave de duplicata: mesmo nome (normalizado) + mesma biblioteca + mesmo
+// destino (owned/wishlist). Dois jogos com o mesmo nome em bibliotecas
+// diferentes (ex: Steam e Epic) NÃO são duplicata — é legítimo ter o mesmo
+// jogo em duas lojas.
+function dedupeKey(game) {
+  return `${game.name.trim().toLowerCase()}|${game.platform}|${game.ownership || "owned"}`;
+}
+
+function findDuplicateGroups(games) {
+  const map = new Map();
+  for (const g of games) {
+    const key = dedupeKey(g);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(g);
+  }
+  return [...map.values()]
+    .filter((group) => group.length > 1)
+    .map((group) => {
+      const sorted = [...group].sort((a, b) => dedupeScore(b) - dedupeScore(a));
+      return { keep: sorted[0], remove: sorted.slice(1) };
+    });
+}
+
+function DedupeModal({ games, onClose, onRemove }) {
+  const groups = useMemo(() => findDuplicateGroups(games), [games]);
+  const totalToRemove = groups.reduce((sum, g) => sum + g.remove.length, 0);
+
+  if (groups.length === 0) {
+    return (
+      <ModalShell onClose={onClose} maxW="max-w-md">
+        <div className="p-6 text-center">
+          <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-3" />
+          <p className="text-sm text-zinc-300">Nenhum jogo duplicado encontrado.</p>
+          <button
+            onClick={onClose}
+            className="mt-4 bg-zinc-800 hover:bg-zinc-700 transition-colors text-sm rounded-lg px-5 py-2"
+          >
+            Fechar
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  return (
+    <ModalShell onClose={onClose} maxW="max-w-lg">
+      <div className="p-6">
+        <h2 className="text-base font-semibold mb-1 flex items-center gap-2">
+          <Layers className="w-5 h-5 text-zinc-400" />
+          Remover duplicados
+        </h2>
+        <p className="text-xs text-zinc-500 mb-5">
+          {groups.length} {groups.length === 1 ? "jogo duplicado" : "jogos duplicados"} encontrados — considerando
+          mesmo nome + mesma biblioteca + mesmo destino (meus jogos/lista de desejos). Em cada grupo, a cópia com
+          análise da IA (ou mais completa) é mantida; as outras são removidas.
+        </p>
+
+        <div className="max-h-80 overflow-y-auto border border-zinc-800 rounded-lg divide-y divide-zinc-800 mb-5">
+          {groups.map((g) => (
+            <div key={g.keep.id} className="px-3 py-2.5">
+              <p className="text-sm font-medium text-zinc-200 mb-1.5">{g.keep.name}</p>
+              <div className="flex items-center gap-2 text-xs mb-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="text-emerald-300">Mantém</span>
+                <span className={`px-2 py-0.5 rounded-full ${platformOf(g.keep.platform).badge}`}>
+                  {platformLabelOf(g.keep)}
+                </span>
+                {(g.keep.analyses?.length || 0) > 0 && (
+                  <span className="text-zinc-500">· já tem análise</span>
+                )}
+              </div>
+              {g.remove.map((r) => (
+                <div key={r.id} className="flex items-center gap-2 text-xs text-zinc-500 mt-1">
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>Remove cópia</span>
+                  {(r.analyses?.length || 0) > 0 && (
+                    <span className="text-amber-400">(tinha análise, mas a mantida é mais completa)</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={onClose}
+            className="flex-1 border border-zinc-800 hover:border-zinc-600 text-zinc-300 text-sm font-medium rounded-lg py-2.5 transition-colors"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => onRemove(groups.flatMap((g) => g.remove.map((r) => r.id)))}
+            className="flex-1 bg-red-700 hover:bg-red-600 transition-colors text-white text-sm font-medium rounded-lg py-2.5"
+          >
+            Remover {totalToRemove} {totalToRemove === 1 ? "duplicata" : "duplicatas"}
+          </button>
+        </div>
       </div>
     </ModalShell>
   );
@@ -3411,21 +3548,32 @@ function GameLoreSection({ game, onApplyLore }) {
 // feature essencial, não deveria virar um erro visível toda vez.
 function GameScreenshotsSection({ gameName }) {
   const [screenshots, setScreenshots] = useState([]);
+  const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("screenshots"); // "screenshots" | "videos"
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  const [playingVideoId, setPlayingVideoId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setScreenshots([]);
+    setVideos([]);
+    setTab("screenshots");
     (async () => {
       try {
         const res = await fetch(`/api/igdb?name=${encodeURIComponent(gameName)}`);
         if (!res.ok) return; // sem credenciais configuradas, ou não encontrado — ignora
         const body = await res.json();
-        if (!cancelled) setScreenshots(body.screenshots || []);
+        if (cancelled) return;
+        setScreenshots(body.screenshots || []);
+        setVideos(body.videos || []);
+        // se só tiver vídeo e nenhuma screenshot, já abre na aba de vídeos
+        if ((body.screenshots || []).length === 0 && (body.videos || []).length > 0) {
+          setTab("videos");
+        }
       } catch {
-        // rede falhou — segue sem screenshots, sem quebrar o resto do card
+        // rede falhou — segue sem mídia, sem quebrar o resto do card
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -3435,22 +3583,70 @@ function GameScreenshotsSection({ gameName }) {
     };
   }, [gameName]);
 
-  if (loading || screenshots.length === 0) return null;
+  if (loading || (screenshots.length === 0 && videos.length === 0)) return null;
 
   return (
     <div className="mb-4">
-      <p className="text-xs font-medium text-zinc-500 mb-2">Screenshots</p>
-      <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
-        {screenshots.map((url, i) => (
+      <div className="flex items-center gap-3 mb-2">
+        {screenshots.length > 0 && (
           <button
-            key={url}
-            onClick={() => setLightboxIndex(i)}
-            className="shrink-0 w-40 aspect-video rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 transition-colors"
+            onClick={() => setTab("screenshots")}
+            className={`text-xs font-medium transition-colors ${
+              tab === "screenshots" ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"
+            }`}
           >
-            <img src={url} alt="" className="w-full h-full object-cover" loading="lazy" />
+            Screenshots
           </button>
-        ))}
+        )}
+        {videos.length > 0 && (
+          <button
+            onClick={() => setTab("videos")}
+            className={`text-xs font-medium transition-colors ${
+              tab === "videos" ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            Vídeos
+          </button>
+        )}
       </div>
+
+      {tab === "screenshots" && screenshots.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {screenshots.map((url, i) => (
+            <button
+              key={url}
+              onClick={() => setLightboxIndex(i)}
+              className="shrink-0 w-40 aspect-video rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 transition-colors"
+            >
+              <img src={url} alt="" className="w-full h-full object-cover" loading="lazy" />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tab === "videos" && videos.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {videos.map((v) => (
+            <button
+              key={v.youtubeId}
+              onClick={() => setPlayingVideoId(v.youtubeId)}
+              className="relative shrink-0 w-40 aspect-video rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 transition-colors group"
+            >
+              <img
+                src={`https://img.youtube.com/vi/${v.youtubeId}/hqdefault.jpg`}
+                alt=""
+                className="w-full h-full object-cover"
+                loading="lazy"
+              />
+              <div className="absolute inset-0 bg-black/30 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                <div className="w-9 h-9 rounded-full bg-black/70 flex items-center justify-center">
+                  <div className="w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-white ml-0.5" />
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
 
       {lightboxIndex !== null && (
         <div
@@ -3481,6 +3677,30 @@ function GameScreenshotsSection({ gameName }) {
           )}
           <button
             onClick={() => setLightboxIndex(null)}
+            className="absolute top-5 right-5 text-white/80 hover:text-white"
+            aria-label="Fechar"
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
+      )}
+
+      {playingVideoId && (
+        <div
+          className="fixed inset-0 z-40 bg-black/90 flex items-center justify-center p-6"
+          onClick={() => setPlayingVideoId(null)}
+        >
+          <div className="w-full max-w-3xl aspect-video" onClick={(e) => e.stopPropagation()}>
+            <iframe
+              src={`https://www.youtube.com/embed/${playingVideoId}?autoplay=1`}
+              title="Vídeo do jogo"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+              className="w-full h-full rounded-lg"
+            />
+          </div>
+          <button
+            onClick={() => setPlayingVideoId(null)}
             className="absolute top-5 right-5 text-white/80 hover:text-white"
             aria-label="Fechar"
           >
