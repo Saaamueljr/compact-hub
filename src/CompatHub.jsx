@@ -764,9 +764,9 @@ export default function CompatHub() {
 
   // Tenta restaurar uma sessão de Drive já autorizada anteriormente (o token
   // do Google dura ~1h e fica em localStorage — ver driveSync.js, sobrevive
-  // a fechar o app). Se existir e ainda for válido, puxa o snapshot mais
-  // recente do Drive por cima do que acabou de carregar do localStorage (o
-  // Drive é a fonte de verdade quando conectado).
+  // a fechar o app). Se existir e ainda for válido, reconcilia com o que já
+  // está local por `updatedAt` (last-write-wins de verdade — NÃO confia
+  // cegamente no Drive; se o local for mais novo, é o Drive que é atualizado).
   useEffect(() => {
     if (!loaded) return;
     (async () => {
@@ -775,8 +775,10 @@ export default function CompatHub() {
         driveInitedRef.current = true;
         if (driveSync.isSignedIn()) {
           setDriveStatus("syncing");
-          const remote = await driveSync.load();
-          if (remote) applyLoadedData(remote);
+          const localRaw = await storage.get(STORAGE_KEY);
+          const localPayload = localRaw?.value ? JSON.parse(localRaw.value) : null;
+          const { source, data } = await driveSync.reconcile(localPayload);
+          if (source === "remote" && data) applyLoadedData(data);
           setDriveStatus("connected");
         }
       } catch (e) {
@@ -796,8 +798,42 @@ export default function CompatHub() {
         driveInitedRef.current = true;
       }
       await driveSync.signIn();
-      const { data } = await driveSync.migrateFromLocalStorageIfNeeded(STORAGE_KEY);
-      if (data) applyLoadedData(data);
+      const localRaw = await storage.get(STORAGE_KEY);
+      const localPayload = localRaw?.value ? JSON.parse(localRaw.value) : null;
+      const { source, data } = await driveSync.reconcile(localPayload);
+      // só sobrescreve o que está na tela se o Drive realmente tinha a
+      // versão mais recente — se o local venceu, o estado atual já é o
+      // certo, e o reconcile() já cuidou de subir ele pro Drive.
+      if (source === "remote" && data) applyLoadedData(data);
+      setDriveStatus("connected");
+    } catch (e) {
+      handleDriveError(e);
+    }
+  }
+
+  // Botão de emergência: força o que está nesta tela agora a subir pro
+  // Drive, sem comparar timestamp com nada. Existe pra casos como "conectei
+  // e percebi que o Drive tinha uma versão velha, quero garantir que o que
+  // vejo aqui vira a versão de verdade".
+  async function forcePushToDrive() {
+    setDriveError("");
+    setDriveStatus("syncing");
+    try {
+      if (!driveInitedRef.current) {
+        await driveSync.init(GOOGLE_DRIVE_CLIENT_ID);
+        driveInitedRef.current = true;
+      }
+      if (!driveSync.isSignedIn()) await driveSync.signIn();
+      const payload = {
+        profiles,
+        activeProfileId,
+        games,
+        franchiseNotes,
+        tierSchemaVersion: 2,
+        updatedAt: new Date().toISOString(),
+      };
+      await driveSync.save(payload);
+      await storage.set(STORAGE_KEY, JSON.stringify(payload));
       setDriveStatus("connected");
     } catch (e) {
       handleDriveError(e);
@@ -847,6 +883,7 @@ export default function CompatHub() {
       games: nextGames,
       franchiseNotes: nextFranchiseNotes,
       tierSchemaVersion: 2,
+      updatedAt: new Date().toISOString(),
     };
     try {
       await storage.set(STORAGE_KEY, JSON.stringify(payload));
@@ -1138,6 +1175,7 @@ export default function CompatHub() {
               error={driveError}
               onConnect={connectDrive}
               onDisconnect={disconnectDrive}
+              onForcePush={forcePushToDrive}
             />
 
           <button
@@ -2683,8 +2721,9 @@ function AddGameModal({ games, onClose, onAdd, defaultOwnership = "owned" }) {
 // header, ao lado de "Perfis de hardware". Estados possíveis: desconectado
 // (botão neutro "Conectar Drive"), conectando, sincronizado (nuvem verde),
 // sincronizando (nuvem girando) e erro (nuvem vermelha + tooltip do erro).
-function DriveSyncButton({ status, error, onConnect, onDisconnect }) {
+function DriveSyncButton({ status, error, onConnect, onDisconnect, onForcePush }) {
   const [open, setOpen] = useState(false);
+  const [forcing, setForcing] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
@@ -2740,6 +2779,22 @@ function DriveSyncButton({ status, error, onConnect, onDisconnect }) {
               ? "Sincronizando sua biblioteca..."
               : "Sua biblioteca está sincronizada com o Google Drive."}
           </p>
+          <p className="text-zinc-600 mb-2">
+            Se você editou o app em mais de um lugar sem estar conectado, use "forçar envio" pra garantir que o que
+            está nesta tela vira a versão salva no Drive.
+          </p>
+          <button
+            onClick={async () => {
+              setForcing(true);
+              await onForcePush();
+              setForcing(false);
+              setOpen(false);
+            }}
+            disabled={forcing}
+            className="w-full text-left text-zinc-400 hover:text-zinc-200 transition-colors mb-2 disabled:opacity-50"
+          >
+            {forcing ? "Enviando..." : "Forçar envio deste dispositivo pro Drive"}
+          </button>
           <button
             onClick={() => {
               onDisconnect();
@@ -3546,31 +3601,71 @@ function GameLoreSection({ game, onApplyLore }) {
 // chave), some silenciosamente se não achar nada ou se IGDB_CLIENT_ID/
 // IGDB_CLIENT_SECRET não estiverem configurados no servidor — não é uma
 // feature essencial, não deveria virar um erro visível toda vez.
-function GameScreenshotsSection({ gameName }) {
+function GameScreenshotsSection({ game, onCacheVideos }) {
   const [screenshots, setScreenshots] = useState([]);
   const [videos, setVideos] = useState([]);
+  const [videoSource, setVideoSource] = useState(null); // "igdb" | "youtube"
   const [loading, setLoading] = useState(true);
+  const [fetchingMore, setFetchingMore] = useState(false);
   const [tab, setTab] = useState("screenshots"); // "screenshots" | "videos"
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const [playingVideoId, setPlayingVideoId] = useState(null);
+
+  const gameName = game.name;
+
+  // Busca gameplay real no YouTube — só usado quando o IGDB não tem trailer
+  // pra esse jogo. Cacheia o resultado no próprio jogo (via onCacheVideos)
+  // pra nunca gastar cota de busca de novo sem o usuário pedir manualmente.
+  async function fetchYoutubeFallback() {
+    try {
+      const res = await fetch(`/api/youtube-gameplay?name=${encodeURIComponent(gameName)}`);
+      const body = await res.json().catch(() => null);
+      if (!res.ok) return; // sem chave configurada, cota estourada, ou erro — ignora, sem quebrar a tela
+      const items = body?.items || [];
+      setVideos(items);
+      setVideoSource("youtube");
+      if (items.length > 0) setTab((t) => (screenshotsIsEmptyRef.current ? "videos" : t));
+      onCacheVideos(items); // cacheia mesmo se vier vazio, pra não bater na API de novo à toa
+    } catch {
+      // rede falhou — segue sem vídeo, sem cachear (tenta de novo na próxima vez)
+    }
+  }
+
+  // ref auxiliar só pra saber, dentro do fetchYoutubeFallback, se screenshots
+  // ficou vazio nessa carga — sem isso teria closure com valor desatualizado
+  const screenshotsIsEmptyRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setScreenshots([]);
     setVideos([]);
+    setVideoSource(null);
     setTab("screenshots");
     (async () => {
       try {
         const res = await fetch(`/api/igdb?name=${encodeURIComponent(gameName)}`);
-        if (!res.ok) return; // sem credenciais configuradas, ou não encontrado — ignora
-        const body = await res.json();
+        const body = res.ok ? await res.json() : null;
         if (cancelled) return;
-        setScreenshots(body.screenshots || []);
-        setVideos(body.videos || []);
-        // se só tiver vídeo e nenhuma screenshot, já abre na aba de vídeos
-        if ((body.screenshots || []).length === 0 && (body.videos || []).length > 0) {
-          setTab("videos");
+
+        const shots = body?.screenshots || [];
+        setScreenshots(shots);
+        screenshotsIsEmptyRef.current = shots.length === 0;
+
+        const igdbVideos = body?.videos || [];
+        if (igdbVideos.length > 0) {
+          setVideos(igdbVideos);
+          setVideoSource("igdb");
+          if (shots.length === 0) setTab("videos");
+        } else if (game.gameplayVideosCache !== undefined) {
+          // já buscamos no YouTube antes pra esse jogo — usa o cache, sem
+          // gastar cota de novo (mesmo que o cache seja uma lista vazia,
+          // significa "já tentamos e não achou nada bom")
+          setVideos(game.gameplayVideosCache);
+          setVideoSource("youtube");
+          if (shots.length === 0 && game.gameplayVideosCache.length > 0) setTab("videos");
+        } else {
+          await fetchYoutubeFallback();
         }
       } catch {
         // rede falhou — segue sem mídia, sem quebrar o resto do card
@@ -3581,7 +3676,13 @@ function GameScreenshotsSection({ gameName }) {
     return () => {
       cancelled = true;
     };
-  }, [gameName]);
+  }, [game.id]);
+
+  async function handleManualRefetch() {
+    setFetchingMore(true);
+    await fetchYoutubeFallback();
+    setFetchingMore(false);
+  }
 
   if (loading || (screenshots.length === 0 && videos.length === 0)) return null;
 
@@ -3605,7 +3706,27 @@ function GameScreenshotsSection({ gameName }) {
               tab === "videos" ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            Vídeos
+            Vídeos {videoSource === "youtube" && <span className="text-zinc-600">(YouTube)</span>}
+          </button>
+        )}
+        {videos.length === 0 && !loading && (
+          <button
+            onClick={handleManualRefetch}
+            disabled={fetchingMore}
+            className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors disabled:opacity-50 flex items-center gap-1"
+          >
+            {fetchingMore ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Buscar gameplay no YouTube
+          </button>
+        )}
+        {videos.length > 0 && videoSource === "youtube" && tab === "videos" && (
+          <button
+            onClick={handleManualRefetch}
+            disabled={fetchingMore}
+            title="Buscar outros vídeos"
+            className="text-zinc-600 hover:text-zinc-400 transition-colors disabled:opacity-50 ml-auto"
+          >
+            {fetchingMore ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
           </button>
         )}
       </div>
@@ -3926,7 +4047,7 @@ function GameDetailModal({
           {/* screenshots via IGDB — carrega sozinho, some se IGDB não tiver
               esse jogo ou se as credenciais ainda não estiverem configuradas
               no servidor (falha silenciosa, não é uma feature essencial) */}
-          <GameScreenshotsSection gameName={game.name} />
+          <GameScreenshotsSection game={game} onCacheVideos={(items) => onApplyRaData({ gameplayVideosCache: items })} />
 
           {/* status: quero jogar / jogando / zerado / abandonado */}
           <div className="flex flex-wrap gap-1.5 mb-2">

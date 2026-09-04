@@ -607,6 +607,58 @@ async function handlePcgamingwiki(request, env) {
   });
 }
 
+// --- YouTube (gameplay de verdade, fallback quando o IGDB não tem trailer) ---
+// O IGDB só tem vídeo curado pra uma fração dos jogos (principalmente AAA
+// recentes) — pra indie/retrô, a cobertura real está no YouTube mesmo
+// (longplays, gameplays feitos pela comunidade). Busca direta via YouTube
+// Data API v3. Tem cota diária grátis (10.000 unidades, cada busca custa
+// 100 — ou seja, ~100 buscas/dia), então o front SÓ deve chamar isso uma vez
+// por jogo e cachear o resultado no próprio registro do jogo (ver
+// gameplayVideosCache em CompatHub.jsx) — nunca buscar de novo sem o usuário
+// pedir explicitamente.
+async function handleYoutubeGameplay(request, env) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get("name");
+  if (!name) return json({ error: "Falta o parâmetro name." }, 400);
+
+  const apiKey = env.YOUTUBE_API_KEY;
+  if (!apiKey) return json({ error: "YOUTUBE_API_KEY não configurada no servidor." }, 500);
+
+  const api = new URL("https://www.googleapis.com/youtube/v3/search");
+  api.searchParams.set("part", "snippet");
+  api.searchParams.set("q", `${name} gameplay`);
+  api.searchParams.set("type", "video");
+  api.searchParams.set("videoEmbeddable", "true");
+  api.searchParams.set("maxResults", "6");
+  api.searchParams.set("key", apiKey);
+
+  let res;
+  try {
+    res = await fetch(api);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o YouTube: ${e.message}` }, 502);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const reason = body?.error?.errors?.[0]?.reason;
+    if (reason === "quotaExceeded") {
+      return json({ error: "Cota diária do YouTube esgotada — tenta de novo amanhã." }, 429);
+    }
+    return json({ error: `YouTube retornou erro ${res.status}.` }, 502);
+  }
+
+  const data = await res.json().catch(() => null);
+  const items = (data?.items || [])
+    .filter((it) => it.id?.videoId)
+    .map((it) => ({
+      title: it.snippet?.title || name,
+      channelTitle: it.snippet?.channelTitle || null,
+      youtubeId: it.id.videoId,
+    }));
+
+  return json({ items });
+}
+
 // --- Notícias (RSS agregado, sem chave de API) ---
 // Agrega alguns feeds RSS de sites de games num formato unificado. Parsing
 // feito com regex simples (sem lib de XML) porque RSS 2.0 é bem regular e
@@ -1141,6 +1193,16 @@ export default {
       }
       if (request.method === "GET") {
         return handleNews(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/youtube-gameplay") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleYoutubeGameplay(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }

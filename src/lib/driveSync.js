@@ -199,18 +199,30 @@ class DriveSync {
     return payload;
   }
 
-  // Migração única do localStorage pro Drive — só roda se ainda não existir
-  // arquivo lá (ou seja, primeira vez que este usuário conecta a conta).
-  async migrateFromLocalStorageIfNeeded(localStorageKey) {
-    const existing = await this.load();
-    if (existing) return { migrated: false, data: existing };
+  // Reconciliação real de last-write-wins: compara o `updatedAt` do que está
+  // salvo local com o que está no Drive, e mantém o mais recente. Se o local
+  // não tiver `updatedAt` (dados antigos, salvos antes dessa correção), dá o
+  // benefício da dúvida pro local — é o que está na tela agora, mais seguro
+  // do que sobrescrever silenciosamente com algo potencialmente desatualizado.
+  async reconcile(localPayload) {
+    const remote = await this.load();
 
-    const raw = localStorage.getItem(localStorageKey);
-    if (!raw) return { migrated: false, data: null };
+    if (!remote) {
+      if (localPayload) await this.save(localPayload);
+      return { source: "local", data: localPayload };
+    }
+    if (!localPayload) {
+      return { source: "remote", data: remote };
+    }
 
-    const localData = JSON.parse(raw);
-    const saved = await this.save(localData);
-    return { migrated: true, data: saved };
+    const localTime = localPayload.updatedAt ? Date.parse(localPayload.updatedAt) : Date.now();
+    const remoteTime = remote.updatedAt ? Date.parse(remote.updatedAt) : 0;
+
+    if (localTime >= remoteTime) {
+      await this.save(localPayload);
+      return { source: "local", data: localPayload };
+    }
+    return { source: "remote", data: remote };
   }
 }
 

@@ -98,6 +98,8 @@ O app agora sincroniza sua biblioteca (jogos, perfis, notas de franquia) num arq
 
 **Sobre a sessão ficar conectada:** o login fica salvo em `localStorage`, então fechar e reabrir o app/aba não desconecta mais. O que ainda desconecta é a expiração natural do token do Google (~1h de duração, limitação do fluxo OAuth sem backend usado aqui) — quando isso acontece, o app volta sozinho pro botão "Conectar Drive" sem mostrar erro, é só clicar de novo.
 
+**Correção importante — last-write-wins de verdade:** numa versão anterior, conectar no Drive sempre sobrescrevia o que estava na tela com o que estava salvo lá, mesmo se o que você tinha localmente fosse mais recente (ex: uma importação de planilha feita enquanto estava desconectado). Isso já foi corrigido: agora, ao conectar, o app compara a data de modificação (`updatedAt`) de cada lado e mantém o mais recente de verdade — se o local for mais novo, é ele que sobe pro Drive, não o contrário. Também tem um botão "Forçar envio deste dispositivo pro Drive" no menu do status do Drive, pra emergências (ex: se por algum motivo o Drive ficou com uma versão velha e você quer garantir que o que está na tela vira a versão de verdade, sem depender da comparação automática).
+
 O Client ID OAuth já está embutido em `src/CompatHub.jsx` (constante `GOOGLE_DRIVE_CLIENT_ID`) — ele não é segredo, é feito pra ficar exposto no client-side. Não precisa configurar nada a mais pra essa parte funcionar; só clicar em "Conectar Drive" no app já publicado.
 
 **Importante — origens autorizadas:** no Google Cloud Console, em Credenciais > seu Client ID > "Origens JavaScript autorizadas", confirme que a URL final do seu deploy (ex: `https://compat-hub.SEU-SUBDOMINIO.workers.dev`) está cadastrada. Se você mudar de domínio depois (domínio próprio, por exemplo), adicione a nova origem lá, senão o login do Drive falha com erro de origem não autorizada.
@@ -132,6 +134,21 @@ Agrega RSS da IGN, Eurogamer e Steam num painel estilo revista (manchete grande 
 Assim que `IGDB_CLIENT_ID`/`IGDB_CLIENT_SECRET` estiverem configurados (ver seção do IGDB acima), a tela de detalhe de cada jogo passa a carregar uma galeria de screenshots automaticamente, com clique pra abrir em tela cheia. Se o IGDB não tiver aquele jogo ou as credenciais ainda não estiverem configuradas, a seção simplesmente não aparece — não gera erro visível.
 
 **Vídeos de gameplay/trailer:** o mesmo endpoint `/api/igdb` agora também traz vídeos (IDs de vídeo do YouTube cadastrados no IGDB pra aquele jogo). Quando tem os dois, aparece uma aba "Screenshots" / "Vídeos" na tela de detalhe; clicar num vídeo abre o player do YouTube embutido, sem sair do app. Nem todo jogo tem vídeo cadastrado no IGDB — quando não tem, a aba simplesmente não aparece.
+
+### Fallback de gameplay via YouTube (pra jogos indie/retrô sem trailer no IGDB)
+
+O IGDB só tem vídeo curado pra uma fração dos jogos — geralmente títulos AAA recentes. Pra indie e retrô (que é a maior parte de uma biblioteca de emulação), a cobertura de trailer lá é baixa. Em vez disso, quando o IGDB não tem vídeo, o app busca gameplay de verdade direto no YouTube (longplays/gameplays feitos pela comunidade, que existem pra praticamente qualquer jogo).
+
+Pra ativar, é uma chave nova — **grátis, e no mesmo projeto do Google Cloud que você já usa pro Drive** (não precisa criar projeto novo):
+
+1. No mesmo projeto onde criou o Client ID do Drive, vá em **APIs e serviços > Biblioteca**, busque "YouTube Data API v3" e clique em **Ativar**
+2. Vá em **APIs e serviços > Credenciais** → **+ Criar credenciais** → **Chave de API**
+3. Copia a chave gerada
+4. No Cloudflare (Settings > Variables and Secrets do Worker), adiciona `YOUTUBE_API_KEY` (**Secret**)
+
+**Sobre a cota:** a YouTube Data API é grátis mas limitada a 10.000 unidades/dia, e cada busca custa 100 — ou seja, ~100 buscas por dia. Pra não gastar isso à toa, o resultado é **cacheado no próprio jogo** (campo `gameplayVideosCache`) na primeira vez que abre a tela de detalhe dele — abrir de novo depois não gasta cota nenhuma. Se o resultado vier ruim (vídeo errado, por exemplo), tem um botão de atualizar (ícone de refresh) na aba de vídeos pra buscar de novo manualmente.
+
+Sem essa chave configurada, o fallback simplesmente não acontece (mostra só o que o IGDB tiver, ou nada) — não quebra o resto do app.
 
 ## Novidades desta atualização: bibliotecas, lista de desejos e importação em lote
 
