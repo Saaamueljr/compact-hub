@@ -1227,7 +1227,372 @@ export default {
       return json({ error: "Método não permitido." }, 405);
     }
 
+    if (url.pathname === "/api/steam") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleSteamAchievements(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/steam/library") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleSteamLibrary(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/gog/auth-url") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleGogAuthUrl(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/gog/exchange") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleGogExchange(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/gog/games") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleGogLibrary(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/gog") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleGogAchievements(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
     // qualquer outra rota: serve o build estático (index.html, JS, CSS, imagens)
     return env.ASSETS.fetch(request);
   },
 };
+
+// ============================================================
+// STEAM — API oficial (chave própria, gratuita, developer.valvesoftware.com)
+// Precisa de env.STEAM_API_KEY e env.STEAM_ID (SteamID64) configurados como
+// secrets. O perfil e os detalhes do jogo precisam estar como "público" nas
+// configurações de privacidade da Steam, senão a API devolve lista vazia.
+// ============================================================
+
+async function handleSteamAchievements(request, env) {
+  const url = new URL(request.url);
+  const appId = url.searchParams.get("appId");
+  if (!appId) return json({ error: "Falta o parâmetro appId." }, 400);
+
+  const apiKey = env.STEAM_API_KEY;
+  const steamId = env.STEAM_ID;
+  if (!apiKey || !steamId) {
+    return json(
+      { error: "STEAM_API_KEY e/ou STEAM_ID não configurados no servidor (Settings > Variables and Secrets)." },
+      500
+    );
+  }
+
+  // GetPlayerAchievements só devolve apiname/achieved/unlocktime — os nomes e
+  // descrições legíveis vêm do schema do jogo (GetSchemaForGame), então as
+  // duas chamadas rodam em paralelo.
+  const playerUrl = `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${encodeURIComponent(
+    appId
+  )}&key=${encodeURIComponent(apiKey)}&steamid=${encodeURIComponent(steamId)}&l=portuguese`;
+  const schemaUrl = `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?appid=${encodeURIComponent(
+    appId
+  )}&key=${encodeURIComponent(apiKey)}&l=portuguese`;
+
+  const [playerResult, schemaResult] = await Promise.allSettled([
+    fetch(playerUrl).then((r) => r.json()),
+    fetch(schemaUrl).then((r) => r.json()),
+  ]);
+
+  if (playerResult.status !== "fulfilled" || !playerResult.value?.playerstats) {
+    return json({ error: "Falha ao consultar a Steam. Confira se o appId existe e se o perfil está público." }, 502);
+  }
+
+  const playerStats = playerResult.value.playerstats;
+  if (playerStats.success === false) {
+    return json(
+      { error: playerStats.error || "Este jogo não tem conquistas cadastradas na Steam, ou o perfil está privado." },
+      404
+    );
+  }
+
+  const schemaAchievements =
+    schemaResult.status === "fulfilled"
+      ? schemaResult.value?.game?.availableGameStats?.achievements || []
+      : [];
+  const schemaById = Object.fromEntries(schemaAchievements.map((a) => [a.name, a]));
+
+  const achievements = (playerStats.achievements || []).map((a) => {
+    const meta = schemaById[a.apiname] || {};
+    return {
+      id: a.apiname,
+      title: meta.displayName || a.apiname,
+      description: meta.description || "",
+      earned: Boolean(a.achieved),
+      dateEarned: a.achieved && a.unlocktime ? new Date(a.unlocktime * 1000).toISOString() : null,
+      iconUnlocked: meta.icon || null,
+      iconLocked: meta.icongray || null,
+    };
+  });
+
+  achievements.sort((a, b) => {
+    if (a.earned !== b.earned) return a.earned ? -1 : 1;
+    return 0;
+  });
+
+  const numAwardedToUser = achievements.filter((a) => a.earned).length;
+
+  return json({
+    gameTitle: playerStats.gameName || null,
+    numAchievements: achievements.length,
+    numAwardedToUser,
+    userCompletion: achievements.length ? `${((numAwardedToUser / achievements.length) * 100).toFixed(2)}%` : "0.00%",
+    achievements,
+  });
+}
+
+// Lista de jogos possuídos (pra importar a biblioteca da Steam de uma vez).
+// IsPublished=true e playtime só aparecem se o perfil estiver público.
+async function handleSteamLibrary(request, env) {
+  const apiKey = env.STEAM_API_KEY;
+  const steamId = env.STEAM_ID;
+  if (!apiKey || !steamId) {
+    return json(
+      { error: "STEAM_API_KEY e/ou STEAM_ID não configurados no servidor (Settings > Variables and Secrets)." },
+      500
+    );
+  }
+
+  const ownedUrl = `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${encodeURIComponent(
+    apiKey
+  )}&steamid=${encodeURIComponent(steamId)}&include_appinfo=true&include_played_free_games=true`;
+
+  let response;
+  try {
+    response = await fetch(ownedUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar a Steam: ${e.message}` }, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!data?.response?.games) {
+    return json({ error: "Não foi possível ler a biblioteca. Confira se o perfil e a lista de jogos estão públicos." }, 502);
+  }
+
+  const games = data.response.games.map((g) => ({
+    appId: g.appid,
+    name: g.name,
+    playtimeMinutes: g.playtime_forever || 0,
+    iconUrl: g.img_icon_url
+      ? `https://media.steampowered.com/steamcommunity/public/images/apps/${g.appid}/${g.img_icon_url}.jpg`
+      : null,
+  }));
+
+  return json({ totalGames: data.response.game_count || games.length, games });
+}
+
+// ============================================================
+// GOG — NÃO existe API pública oficial de conquistas. Isso usa os endpoints
+// internos não-documentados que o próprio site gog.com/cliente Galaxy usam
+// (documentados de forma não-oficial em gogapidocs.readthedocs.io). client_id
+// e client_secret abaixo são os do cliente oficial da GOG — não há como
+// registrar credenciais próprias, a GOG não abre isso pra terceiros.
+//
+// AVISO: isso pode quebrar a qualquer momento sem aviso da GOG. Não é culpa
+// do código, é a natureza de depender de uma API não pensada pra uso externo.
+//
+// Diferente da Steam/RA, aqui NÃO guardamos nada como secret fixo no servidor:
+// o refresh_token do usuário fica salvo no localStorage do navegador (mesmo
+// padrão já usado pelo driveSync.js) e é enviado em cada chamada, porque a
+// GOG pode rotacionar o refresh_token a cada uso — travar isso como secret
+// do Worker exigiria um redeploy toda vez que expirasse.
+// ============================================================
+
+const GOG_CLIENT_ID = "46899977096215655";
+const GOG_CLIENT_SECRET = "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9";
+const GOG_REDIRECT_URI = "https://embed.gog.com/on_login_success?origin=client";
+
+// Passo 1: devolve a URL de login que o usuário precisa abrir manualmente
+// (não dá pra automatizar — a GOG exige captcha às vezes, por isso pede um
+// navegador de verdade, não uma chamada de servidor).
+async function handleGogAuthUrl() {
+  const authUrl =
+    `https://auth.gog.com/auth?client_id=${GOG_CLIENT_ID}` +
+    `&redirect_uri=${encodeURIComponent(GOG_REDIRECT_URI)}` +
+    `&response_type=code&layout=client2`;
+  return json({ authUrl });
+}
+
+// Passo 2: depois do login, a GOG redireciona pra
+// embed.gog.com/on_login_success?code=XXXX — o usuário copia esse "code" da
+// URL e cola no CompatHub, que manda pra cá pra trocar por um token.
+async function handleGogExchange(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  if (!code) return json({ error: "Falta o parâmetro code." }, 400);
+
+  const tokenUrl =
+    `https://auth.gog.com/token?client_id=${GOG_CLIENT_ID}` +
+    `&client_secret=${GOG_CLIENT_SECRET}` +
+    `&grant_type=authorization_code&code=${encodeURIComponent(code)}` +
+    `&redirect_uri=${encodeURIComponent(GOG_REDIRECT_URI)}`;
+
+  let response;
+  try {
+    response = await fetch(tokenUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar a GOG: ${e.message}` }, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!data?.access_token) {
+    return json({ error: "Código inválido ou expirado. Gere um novo link de login e tente de novo." }, 401);
+  }
+
+  return json({
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    userId: data.user_id,
+    expiresIn: data.expires_in,
+  });
+}
+
+// Troca o refresh_token por um access_token novo (o access_token dura só
+// ~1h). Devolve os dois porque a GOG às vezes manda um refresh_token novo —
+// se vier, o frontend precisa atualizar o que está salvo no localStorage.
+async function refreshGogToken(refreshToken) {
+  const tokenUrl =
+    `https://auth.gog.com/token?client_id=${GOG_CLIENT_ID}` +
+    `&client_secret=${GOG_CLIENT_SECRET}` +
+    `&grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`;
+  const response = await fetch(tokenUrl);
+  const data = await response.json().catch(() => null);
+  if (!data?.access_token) {
+    throw new Error("Sessão da GOG expirada. É preciso logar de novo (o refresh_token não é mais válido).");
+  }
+  return data;
+}
+
+// Lista de jogos possuídos na GOG (IDs numéricos de produto).
+async function handleGogLibrary(request, env) {
+  const url = new URL(request.url);
+  const refreshToken = url.searchParams.get("refreshToken");
+  if (!refreshToken) return json({ error: "Falta o parâmetro refreshToken." }, 400);
+
+  let tokenData;
+  try {
+    tokenData = await refreshGogToken(refreshToken);
+  } catch (e) {
+    return json({ error: e.message }, 401);
+  }
+
+  let response;
+  try {
+    response = await fetch("https://embed.gog.com/user/data/games", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+  } catch (e) {
+    return json({ error: `Falha ao contatar a GOG: ${e.message}` }, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!data?.owned) {
+    return json({ error: "Não foi possível ler a biblioteca da GOG." }, 502);
+  }
+
+  return json({
+    productIds: data.owned,
+    // devolve de volta caso a GOG tenha rotacionado o refresh_token
+    refreshToken: tokenData.refresh_token || refreshToken,
+  });
+}
+
+// Conquistas de um jogo específico da GOG.
+async function handleGogAchievements(request, env) {
+  const url = new URL(request.url);
+  const productId = url.searchParams.get("productId");
+  const refreshToken = url.searchParams.get("refreshToken");
+  const userId = url.searchParams.get("userId");
+  if (!productId || !refreshToken || !userId) {
+    return json({ error: "Faltam parâmetros: productId, refreshToken e userId são obrigatórios." }, 400);
+  }
+
+  let tokenData;
+  try {
+    tokenData = await refreshGogToken(refreshToken);
+  } catch (e) {
+    return json({ error: e.message }, 401);
+  }
+
+  const achUrl = `https://gameplay.gog.com/clients/${encodeURIComponent(productId)}/users/${encodeURIComponent(
+    userId
+  )}/achievements`;
+
+  let response;
+  try {
+    response = await fetch(achUrl, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+  } catch (e) {
+    return json({ error: `Falha ao contatar a GOG: ${e.message}` }, 502);
+  }
+
+  if (response.status === 404) {
+    return json({ error: "Este jogo não tem conquistas cadastradas na GOG." }, 404);
+  }
+  if (!response.ok) {
+    return json({ error: `GOG retornou erro ${response.status}.` }, 502);
+  }
+
+  const data = await response.json().catch(() => null);
+  if (!data?.items) {
+    return json({ error: "Não foi possível interpretar a resposta da GOG." }, 502);
+  }
+
+  const achievements = data.items.map((a) => ({
+    id: a.achievement_id,
+    title: a.name,
+    description: a.description,
+    earned: Boolean(a.date_unlocked),
+    dateEarned: a.date_unlocked || null,
+    iconUnlocked: a.image_url_unlocked || null,
+    iconLocked: a.image_url_locked || null,
+  }));
+
+  achievements.sort((a, b) => {
+    if (a.earned !== b.earned) return a.earned ? -1 : 1;
+    return 0;
+  });
+
+  const numAwardedToUser = achievements.filter((a) => a.earned).length;
+
+  return json({
+    numAchievements: achievements.length,
+    numAwardedToUser,
+    userCompletion: achievements.length ? `${((numAwardedToUser / achievements.length) * 100).toFixed(2)}%` : "0.00%",
+    achievements,
+    // devolve de volta caso a GOG tenha rotacionado o refresh_token
+    refreshToken: tokenData.refresh_token || refreshToken,
+  });
+}
