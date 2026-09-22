@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { driveSync } from "./lib/driveSync";
+import { gogAuth } from "./lib/gogAuth";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 import {
@@ -9,7 +10,7 @@ import {
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
   ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper,
-  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers
+  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers, KeyRound
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -1177,6 +1178,8 @@ export default function CompatHub() {
               onDisconnect={disconnectDrive}
               onForcePush={forcePushToDrive}
             />
+
+            <GogConnectButton />
 
           <button
             onClick={() => setShowProfile(true)}
@@ -2810,6 +2813,129 @@ function DriveSyncButton({ status, error, onConnect, onDisconnect, onForcePush }
   );
 }
 
+// Botão + dropdown de conexão com a GOG. Fica no header, ao lado do Drive.
+// Diferente do Drive (OAuth com popup automático), a GOG exige um passo
+// manual: abrir o login numa aba nova e colar de volta o "code" que aparece
+// na URL depois — não dá pra automatizar isso (ver comentário em gogAuth.js
+// sobre por que o fluxo é assim).
+function GogConnectButton() {
+  const [open, setOpen] = useState(false);
+  const [connected, setConnected] = useState(gogAuth.isConnected());
+  const [code, setCode] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  async function handleOpenLogin() {
+    setError("");
+    try {
+      const authUrl = await gogAuth.getAuthUrl();
+      window.open(authUrl, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleExchange() {
+    if (!code.trim()) return;
+    setConnecting(true);
+    setError("");
+    try {
+      await gogAuth.exchangeCode(code.trim());
+      setConnected(true);
+      setCode("");
+      setOpen(false);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  function handleDisconnect() {
+    gogAuth.disconnect();
+    setConnected(false);
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title={connected ? "Conectado à GOG" : "Conectar conta GOG"}
+        className={`flex items-center gap-1.5 text-xs border rounded-md px-3 py-1.5 transition-colors ${
+          connected
+            ? "text-purple-300 border-purple-800 hover:border-purple-600"
+            : "text-zinc-400 border-zinc-800 hover:text-zinc-100 hover:border-zinc-600"
+        }`}
+      >
+        <KeyRound className="w-3.5 h-3.5" />
+        GOG
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-1 w-72 bg-zinc-950 border border-zinc-800 rounded-lg shadow-xl p-3 z-30 text-xs">
+          {connected ? (
+            <>
+              <p className="text-zinc-300 mb-2">Conta GOG conectada.</p>
+              <p className="text-zinc-600 mb-3">
+                As conquistas da GOG usam endpoints não-oficiais — se um dia pararem de funcionar do nada, é a GOG
+                que mudou algo do lado dela, não um bug daqui.
+              </p>
+              <button
+                onClick={handleDisconnect}
+                className="w-full text-left text-zinc-400 hover:text-red-300 transition-colors"
+              >
+                Desconectar
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-zinc-300 mb-2">Conectar conta GOG (não-oficial):</p>
+              <ol className="text-zinc-500 mb-3 space-y-2 list-decimal list-inside">
+                <li>
+                  <button onClick={handleOpenLogin} className="text-purple-400 hover:text-purple-300 underline">
+                    Abrir login da GOG
+                  </button>{" "}
+                  numa aba nova e entre normalmente
+                </li>
+                <li>
+                  Depois de logar, copie o código que aparece na URL (depois de <code>?code=</code>) e cole aqui:
+                </li>
+              </ol>
+              <div className="flex gap-2 mb-2">
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleExchange(); }}
+                  placeholder="cole o code aqui"
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-xs outline-none focus:border-purple-600 font-mono"
+                />
+                <button
+                  onClick={handleExchange}
+                  disabled={connecting || !code.trim()}
+                  className="text-xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 transition-colors rounded-md px-3"
+                >
+                  {connecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Conectar"}
+                </button>
+              </div>
+              {error && <p className="text-red-400">{error}</p>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfileSwitcher({ profiles, activeProfileId, raProfile, onSwitch }) {
   const [open, setOpen] = useState(false);
   const active = profiles.find((p) => p.id === activeProfileId) || profiles[0];
@@ -3402,6 +3528,283 @@ function RetroAchievementsSection({
                 </li>
               );
             })}
+          </ul>
+          {data.achievements.length > 6 && (
+            <button
+              onClick={() => setShowAll(!showAll)}
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors mt-2"
+            >
+              {showAll ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {showAll ? "Ver menos" : `Ver todas (${data.achievements.length})`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Conquistas via Steam — API oficial. Segue o mesmo padrão do
+// RetroAchievementsSection acima, mas sem tradução (a Steam já devolve os
+// textos no idioma pedido, ver ?l=portuguese no worker) nem estimativa de
+// tempo (a Steam devolve unlocktime real, não precisa estimar).
+function SteamAchievementsSection({ game, onApplyRaData }) {
+  const [appIdInput, setAppIdInput] = useState(game.steamAppId || "");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+
+  async function fetchAchievements(appId) {
+    if (!appId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/steam?appId=${encodeURIComponent(appId)}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      setData(body);
+      onApplyRaData({ steamAchievements: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements } });
+    } catch (e) {
+      setError(e.message);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (game.steamAppId) fetchAchievements(game.steamAppId);
+    setAppIdInput(game.steamAppId || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
+  function handleBlurSave() {
+    const trimmed = appIdInput.trim();
+    if (trimmed !== (game.steamAppId || "")) onApplyRaData({ steamAppId: trimmed });
+  }
+
+  function handleSave() {
+    const trimmed = appIdInput.trim();
+    onApplyRaData({ steamAppId: trimmed });
+    if (trimmed) fetchAchievements(trimmed);
+  }
+
+  const visible = data ? (showAll ? data.achievements : data.achievements.slice(0, 6)) : [];
+  const pct = data && data.numAchievements ? Math.round((data.numAwardedToUser / data.numAchievements) * 100) : 0;
+
+  return (
+    <div className="mb-5">
+      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+        <Trophy className="w-3.5 h-3.5" /> Conquistas Steam
+      </div>
+
+      <div className="flex gap-2 mb-2">
+        <input
+          value={appIdInput}
+          onChange={(e) => setAppIdInput(e.target.value)}
+          onBlur={handleBlurSave}
+          onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+          placeholder="Steam App ID (ex: 1091500)"
+          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600 font-mono"
+        />
+        <button
+          onClick={handleSave}
+          disabled={loading || !appIdInput.trim()}
+          className="text-sm bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 transition-colors rounded-lg px-3 flex items-center justify-center"
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+        </button>
+      </div>
+
+      {!game.steamAppId && !appIdInput.trim() && (
+        <p className="text-xs text-zinc-600 mb-2">
+          Cole o App ID do jogo na Steam pra acompanhar suas conquistas. Precisa da STEAM_API_KEY e do STEAM_ID
+          configurados no servidor, e do seu perfil Steam estar público.
+        </p>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-2 text-xs text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          {error}
+        </div>
+      )}
+
+      {data && (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">
+              {data.numAwardedToUser}/{data.numAchievements} conquistas
+            </span>
+            <span className="text-xs text-zinc-500">{data.userCompletion}</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-3">
+            <div className="h-full bg-sky-500" style={{ width: `${pct}%` }} />
+          </div>
+
+          <ul className="space-y-1.5">
+            {visible.map((a) => (
+              <li
+                key={a.id}
+                className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg ${
+                  a.earned ? "bg-zinc-900" : "bg-zinc-900/40 opacity-50"
+                }`}
+              >
+                {a.iconUnlocked && (
+                  <img
+                    src={a.earned ? a.iconUnlocked : a.iconLocked || a.iconUnlocked}
+                    alt=""
+                    className="w-6 h-6 rounded shrink-0"
+                    onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                  />
+                )}
+                <div className="min-w-0">
+                  <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
+                  {a.description && <p className="truncate text-zinc-600">{a.description}</p>}
+                </div>
+                {a.earned && <span className="ml-auto text-sky-400 shrink-0">✓</span>}
+              </li>
+            ))}
+          </ul>
+          {data.achievements.length > 6 && (
+            <button
+              onClick={() => setShowAll(!showAll)}
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors mt-2"
+            >
+              {showAll ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {showAll ? "Ver menos" : `Ver todas (${data.achievements.length})`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Conquistas via GOG — endpoints não-oficiais (ver comentário grande em
+// gogAuth.js e worker/index.js sobre por quê). Só funciona se a conta GOG
+// estiver conectada (botão no header). Estruturalmente igual ao Steam, mas
+// o productId é o ID numérico do produto na GOG (aparece na URL da loja,
+// ex: gog.com/game/dredge -> productId 1971477531).
+function GogAchievementsSection({ game, onApplyRaData }) {
+  const [productIdInput, setProductIdInput] = useState(game.gogProductId || "");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const connected = gogAuth.isConnected();
+
+  async function fetchAchievements(productId) {
+    if (!productId || !connected) return;
+    setLoading(true);
+    setError("");
+    try {
+      const body = await gogAuth.getAchievements(productId);
+      setData(body);
+      onApplyRaData({ gogAchievements: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements } });
+    } catch (e) {
+      setError(e.message);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (game.gogProductId && connected) fetchAchievements(game.gogProductId);
+    setProductIdInput(game.gogProductId || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
+  function handleBlurSave() {
+    const trimmed = productIdInput.trim();
+    if (trimmed !== (game.gogProductId || "")) onApplyRaData({ gogProductId: trimmed });
+  }
+
+  function handleSave() {
+    const trimmed = productIdInput.trim();
+    onApplyRaData({ gogProductId: trimmed });
+    if (trimmed) fetchAchievements(trimmed);
+  }
+
+  const visible = data ? (showAll ? data.achievements : data.achievements.slice(0, 6)) : [];
+  const pct = data && data.numAchievements ? Math.round((data.numAwardedToUser / data.numAchievements) * 100) : 0;
+
+  return (
+    <div className="mb-5">
+      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+        <Trophy className="w-3.5 h-3.5" /> Conquistas GOG
+      </div>
+
+      {!connected && (
+        <p className="flex items-start gap-1.5 text-xs text-amber-300 bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 mb-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          Conecte sua conta GOG no botão do header pra puxar conquistas.
+        </p>
+      )}
+
+      <div className="flex gap-2 mb-2">
+        <input
+          value={productIdInput}
+          onChange={(e) => setProductIdInput(e.target.value)}
+          onBlur={handleBlurSave}
+          onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+          placeholder="ID do produto na GOG (ex: 1971477531)"
+          disabled={!connected}
+          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-purple-600 font-mono disabled:opacity-40"
+        />
+        <button
+          onClick={handleSave}
+          disabled={loading || !connected || !productIdInput.trim()}
+          className="text-sm bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 transition-colors rounded-lg px-3 flex items-center justify-center"
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+        </button>
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-2 text-xs text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          {error}
+        </div>
+      )}
+
+      {data && (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">
+              {data.numAwardedToUser}/{data.numAchievements} conquistas
+            </span>
+            <span className="text-xs text-zinc-500">{data.userCompletion}</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-3">
+            <div className="h-full bg-purple-500" style={{ width: `${pct}%` }} />
+          </div>
+
+          <ul className="space-y-1.5">
+            {visible.map((a) => (
+              <li
+                key={a.id}
+                className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg ${
+                  a.earned ? "bg-zinc-900" : "bg-zinc-900/40 opacity-50"
+                }`}
+              >
+                {a.iconUnlocked && (
+                  <img
+                    src={a.earned ? a.iconUnlocked : a.iconLocked || a.iconUnlocked}
+                    alt=""
+                    className="w-6 h-6 rounded shrink-0"
+                    onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                  />
+                )}
+                <div className="min-w-0">
+                  <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
+                  {a.description && <p className="truncate text-zinc-600">{a.description}</p>}
+                </div>
+                {a.earned && <span className="ml-auto text-purple-400 shrink-0">✓</span>}
+              </li>
+            ))}
           </ul>
           {data.achievements.length > 6 && (
             <button
@@ -4093,6 +4496,16 @@ function GameDetailModal({
               onSaveTranslations={onSaveTranslations}
               onApplyRaData={onApplyRaData}
             />
+          )}
+
+          {/* conquistas via Steam — API oficial */}
+          {game.platform === "steam" && (
+            <SteamAchievementsSection game={game} onApplyRaData={onApplyRaData} />
+          )}
+
+          {/* conquistas via GOG — endpoints não-oficiais, exige conta conectada */}
+          {game.platform === "gog" && (
+            <GogAchievementsSection game={game} onApplyRaData={onApplyRaData} />
           )}
 
           {/* rodando via: emulador ou executável */}
