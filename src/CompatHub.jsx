@@ -4592,6 +4592,7 @@ function GameDetailModal({
     setFranchiseText(game.franchise || "");
   }, [game.franchise]);
   const [showHistory, setShowHistory] = useState(false);
+  const [activeTab, setActiveTab] = useState("compat"); // "compat" | "achievements"
   const [viewedProfileId, setViewedProfileId] = useState(activeProfileId);
   const allAnalyses = game.analyses || [];
 
@@ -4747,84 +4748,12 @@ function GameDetailModal({
             ))}
           </div>
 
-          {/* platinado manual — só pra plataformas onde o CompactHub NÃO lê
-              conquistas via API (tudo, exceto Retro/ISO, que já é automático
-              via RetroAchievements). O usuário sinaliza que zerou as
-              conquistas na própria loja (GOG, Steam, etc). */}
-          {game.platform !== "retro" && (
-            <button
-              onClick={() => onToggleManualPlatinum()}
-              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors mb-6 ${
-                game.manualPlatinum
-                  ? "bg-indigo-950/60 border-indigo-600 text-indigo-300"
-                  : "bg-transparent border-zinc-800 text-zinc-500 hover:text-zinc-300"
-              }`}
-              title="Marca como platinado mesmo sem conquistas do RetroAchievements (ex: 100% na GOG/Steam/Epic)"
-            >
-              <Award className="w-3.5 h-3.5" />
-              Platinado
-            </button>
-          )}
-          {game.platform === "retro" && <div className="mb-6" />}
-
-          {/* conquistas via RetroAchievements — só faz sentido pra jogos
-              retrô/ISO rodando via emulador, que é o que a RA cobre */}
-          {game.platform === "retro" && (
-            <RetroAchievementsSection
-              game={game}
-              onUpdateRaGameId={onUpdateRaGameId}
-              onSaveTranslations={onSaveTranslations}
-              onApplyRaData={onApplyRaData}
-            />
-          )}
-
-          {/* conquistas via Steam — API oficial */}
-          {game.platform === "steam" && (
-            <SteamAchievementsSection game={game} onApplyRaData={onApplyRaData} />
-          )}
-
-          {/* conquistas via GOG — endpoints não-oficiais, exige conta conectada */}
-          {game.platform === "gog" && (
-            <GogAchievementsSection game={game} onApplyRaData={onApplyRaData} />
-          )}
-
-          {/* rodando via: emulador ou executável */}
-          <div className="mb-5">
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-              <Gamepad2 className="w-3.5 h-3.5" /> Rodando via
-            </div>
-            <input
-              list="running-via-options"
-              value={runningViaText}
-              onChange={(e) => setRunningViaText(e.target.value)}
-              onBlur={() => onUpdateRunningVia(runningViaText)}
-              placeholder="ex: PCSX2 v1.6.0 (versão antiga, mais leve)"
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
-            />
-            <datalist id="running-via-options">
-              {RUNNING_VIA_SUGGESTIONS.map((opt) => (
-                <option key={opt} value={opt} />
-              ))}
-              {/* versões exatas cadastradas no perfil de hardware ativo —
-                  ver aba "Perfis de hardware" > Emuladores deste perfil */}
-              {(profiles.find((p) => p.id === activeProfileId)?.emulators || []).map((e) => (
-                <option key={e.id} value={e.version ? `${e.name} v${e.version}` : e.name} />
-              ))}
-            </datalist>
-            <p className="text-xs text-zinc-600 mt-1">
-              Se você já sabe que vai usar uma versão específica (ex: uma mais antiga por compatibilidade), inclua
-              aqui — a análise passa a considerar isso em vez de assumir a versão mais recente. As versões
-              cadastradas no perfil "{activeProfileName}" aparecem como sugestão automática.
-            </p>
-          </div>
-
-          {/* tempo jogado manual — pra plataformas sem fonte automática
-              (Steam/GOG/Epic/Amazon). Pra Retro/ISO o RA já dá uma estimativa
-              (intervalo entre conquistas), mas esse campo funciona pra
-              qualquer plataforma se você preferir registrar à mão. */}
-          <div className="mb-5">
+          {/* tempo jogado — informação fixa no cabeçalho, fora das abas.
+              Ainda manual pra todas as plataformas; puxar automático da
+              Steam/GOG (quando disponível) é uma próxima etapa. */}
+          <div className="mb-4">
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-              <Clock className="w-3.5 h-3.5" /> Tempo jogado (horas, manual)
+              <Clock className="w-3.5 h-3.5" /> Tempo jogado (horas)
             </label>
             <input
               type="number"
@@ -4838,9 +4767,10 @@ function GameDetailModal({
             />
           </div>
 
-          {/* link do detonado / revista digital — guardado na nuvem
-              (Drive, etc), só um link, o CompactHub não hospeda o arquivo */}
-          <div className="mb-5">
+          {/* link do detonado / revista digital — cabeçalho, fora das abas.
+              Guardado na nuvem (Drive, etc), só um link, o CompactHub não
+              hospeda o arquivo */}
+          <div className="mb-4">
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
               <BookOpen className="w-3.5 h-3.5" /> Detonado / revista digital
             </label>
@@ -4879,8 +4809,8 @@ function GameDetailModal({
             <PdfReaderModal url={game.guideUrl} title={game.name} onClose={() => setShowReader(false)} />
           )}
 
-          {/* franquia */}
-          <div className="mb-5">
+          {/* franquia — cabeçalho, fora das abas */}
+          <div className="mb-4">
             <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
               <Users className="w-3.5 h-3.5" /> Franquia
             </div>
@@ -4906,152 +4836,258 @@ function GameDetailModal({
             />
           )}
 
-          {/* objetivos */}
-          <div className="mb-5">
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-              <Target className="w-3.5 h-3.5" /> Objetivos para este jogo
-            </div>
-            <textarea
-              value={goalsText}
-              onChange={(e) => setGoalsText(e.target.value)}
-              onBlur={() => onUpdateGoals(goalsText)}
-              rows={2}
-              placeholder="ex: só quero terminar a campanha, não preciso de 60fps..."
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600 resize-none"
-            />
+          {/* platinado manual — só pra plataformas onde o CompactHub NÃO lê
+              conquistas via API (tudo, exceto Retro/ISO, que já é automático
+              via RetroAchievements). O usuário sinaliza que zerou as
+              conquistas na própria loja (GOG, Steam, etc). */}
+          {game.platform !== "retro" && (
+            <button
+              onClick={() => onToggleManualPlatinum()}
+              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors mb-6 ${
+                game.manualPlatinum
+                  ? "bg-indigo-950/60 border-indigo-600 text-indigo-300"
+                  : "bg-transparent border-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+              title="Marca como platinado mesmo sem conquistas do RetroAchievements (ex: 100% na GOG/Steam/Epic)"
+            >
+              <Award className="w-3.5 h-3.5" />
+              Platinado
+            </button>
+          )}
+          {game.platform === "retro" && <div className="mb-6" />}
+
+          {/* abas: Compatibilidade x Conquistas — a partir daqui o conteúdo
+              muda conforme a aba selecionada */}
+          <div className="flex gap-1 mb-5 border-b border-zinc-800">
+            <button
+              onClick={() => setActiveTab("compat")}
+              className={`flex items-center gap-1.5 text-sm px-4 py-2 border-b-2 -mb-px transition-colors ${
+                activeTab === "compat"
+                  ? "border-indigo-500 text-indigo-300"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <Cpu className="w-3.5 h-3.5" /> Compatibilidade
+            </button>
+            <button
+              onClick={() => setActiveTab("achievements")}
+              className={`flex items-center gap-1.5 text-sm px-4 py-2 border-b-2 -mb-px transition-colors ${
+                activeTab === "achievements"
+                  ? "border-amber-500 text-amber-300"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <Trophy className="w-3.5 h-3.5" /> Conquistas
+            </button>
           </div>
 
-          {/* historico de problemas */}
-          <div className="mb-5">
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-              <History className="w-3.5 h-3.5" /> Histórico de problemas
-            </div>
-            {game.notes && game.notes.length > 0 && (
-              <ul className="space-y-1.5 mb-2">
-                {game.notes.slice().reverse().map((n, i) => (
-                  <li key={i} className="text-sm text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2">
-                    <span className="text-zinc-600 text-xs block mb-0.5">{formatDate(n.date)}</span>
-                    {n.text}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="flex gap-2">
-              <input
-                value={noteText}
-                onChange={(e) => setNoteText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && noteText.trim()) { onAddNote(noteText); setNoteText(""); } }}
-                placeholder="ex: travou na área do porto em baixo"
-                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
-              />
-              <button
-                onClick={() => { if (noteText.trim()) { onAddNote(noteText); setNoteText(""); } }}
-                className="text-sm bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-lg px-3 py-2"
-              >
-                Registrar
-              </button>
-            </div>
-          </div>
-
-          {/* analisar — sempre roda com o perfil ativo no topo da tela */}
-          <button
-            onClick={onAnalyze}
-            disabled={analyzing}
-            className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2.5 mb-1.5"
-          >
-            {analyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {analyzing ? "Analisando com base no seu hardware..." : "Analisar compatibilidade agora"}
-          </button>
-          <p className="text-xs text-zinc-600 text-center mb-4">roda com o perfil ativo: {activeProfileName}</p>
-
-          {error && (
-            <div className="flex items-start gap-2 text-sm text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-4">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              {error}
-            </div>
-          )}
-
-          {/* abas: escolha qual perfil ver o histórico de análises */}
-          {profiles.length > 1 && (
-            <div className="flex flex-wrap gap-1.5 mb-3">
-              {profiles.map((p) => {
-                const hasAnalysis = allAnalyses.some((a) => (a.profileId || activeProfileId) === p.id);
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => setViewedProfileId(p.id)}
-                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                      viewedProfileId === p.id
-                        ? "bg-indigo-600 border-indigo-500 text-white"
-                        : hasAnalysis
-                        ? "bg-zinc-900 border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                        : "bg-transparent border-zinc-800 text-zinc-600"
-                    }`}
-                  >
-                    {p.name}{!hasAnalysis && " (sem análise)"}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* resultado do perfil selecionado na aba */}
-          {latest ? (
-            <div className={`rounded-xl border ${TIER_META[latest.tier]?.border || "border-zinc-700"} bg-zinc-950 p-4 mb-3`}>
-              <div className="flex items-center justify-between mb-2">
-                <TierBadge tier={latest.tier} tierLabel={latest.tierLabel} size="lg" />
-                <div className="text-right">
-                  <span className="text-xs text-zinc-600 block">{formatDate(latest.date)}</span>
-                  <span className="text-xs text-zinc-500">perfil: {latest.profileName || viewedProfile?.name}</span>
-                </div>
-              </div>
-              <p className="text-sm font-medium mb-1.5">{latest.veredito}</p>
-              <p className="text-sm text-zinc-400 mb-3">{latest.motivo}</p>
-              {latest.configuracaoRecomendada && (
-                <p className="text-xs text-zinc-500 mb-2">
-                  <span className="text-zinc-400 font-medium">Configuração sugerida: </span>
-                  {latest.configuracaoRecomendada}
+          {/* ===================== ABA: CONQUISTAS ===================== */}
+          {activeTab === "achievements" && (
+            <div>
+              {game.platform === "retro" && (
+                <RetroAchievementsSection
+                  game={game}
+                  onUpdateRaGameId={onUpdateRaGameId}
+                  onSaveTranslations={onSaveTranslations}
+                  onApplyRaData={onApplyRaData}
+                />
+              )}
+              {game.platform === "steam" && (
+                <SteamAchievementsSection game={game} onApplyRaData={onApplyRaData} />
+              )}
+              {game.platform === "gog" && (
+                <GogAchievementsSection game={game} onApplyRaData={onApplyRaData} />
+              )}
+              {!["retro", "steam", "gog"].includes(game.platform) && (
+                <p className="text-sm text-zinc-500">
+                  Conquistas automáticas ainda não disponíveis pra essa plataforma — Epic e Ubisoft Connect não
+                  têm API pública pra isso.
                 </p>
               )}
-              {latest.avisos && latest.avisos.length > 0 && (
-                <ul className="space-y-1 mt-2">
-                  {latest.avisos.map((a, i) => (
-                    <li key={i} className="text-xs text-amber-300 flex items-start gap-1.5">
-                      <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {a}
-                    </li>
-                  ))}
-                </ul>
-              )}
             </div>
-          ) : (
-            viewedProfileId !== activeProfileId && (
-              <p className="text-xs text-zinc-600 mb-3">
-                Ainda não analisado no perfil "{viewedProfile?.name}". Troque o perfil ativo no topo da tela pra
-                {" "}"{viewedProfile?.name}" e clique em analisar.
-              </p>
-            )
           )}
 
-          {older.length > 0 && (
-            <div className="mb-4">
-              <button
-                onClick={() => setShowHistory(!showHistory)}
-                className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                {showHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                Ver {older.length} análise(s) anterior(es) neste perfil
-              </button>
-              {showHistory && (
-                <div className="mt-2 space-y-2">
-                  {older.map((a, i) => (
-                    <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <TierBadge tier={a.tier} tierLabel={a.tierLabel} />
-                        <span className="text-xs text-zinc-600">{formatDate(a.date)}</span>
-                      </div>
-                      <p className="text-xs text-zinc-500">{a.motivo}</p>
-                    </div>
+          {/* =================== ABA: COMPATIBILIDADE =================== */}
+          {activeTab === "compat" && (
+            <div>
+              {/* rodando via: emulador ou executável */}
+              <div className="mb-5">
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+                  <Gamepad2 className="w-3.5 h-3.5" /> Rodando via
+                </div>
+                <input
+                  list="running-via-options"
+                  value={runningViaText}
+                  onChange={(e) => setRunningViaText(e.target.value)}
+                  onBlur={() => onUpdateRunningVia(runningViaText)}
+                  placeholder="ex: PCSX2 v1.6.0 (versão antiga, mais leve)"
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+                />
+                <datalist id="running-via-options">
+                  {RUNNING_VIA_SUGGESTIONS.map((opt) => (
+                    <option key={opt} value={opt} />
                   ))}
+                  {/* versões exatas cadastradas no perfil de hardware ativo —
+                      ver aba "Perfis de hardware" > Emuladores deste perfil */}
+                  {(profiles.find((p) => p.id === activeProfileId)?.emulators || []).map((e) => (
+                    <option key={e.id} value={e.version ? `${e.name} v${e.version}` : e.name} />
+                  ))}
+                </datalist>
+                <p className="text-xs text-zinc-600 mt-1">
+                  Se você já sabe que vai usar uma versão específica (ex: uma mais antiga por compatibilidade), inclua
+                  aqui — a análise passa a considerar isso em vez de assumir a versão mais recente. As versões
+                  cadastradas no perfil "{activeProfileName}" aparecem como sugestão automática.
+                </p>
+              </div>
+
+              {/* objetivos */}
+              <div className="mb-5">
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+                  <Target className="w-3.5 h-3.5" /> Objetivos para este jogo
+                </div>
+                <textarea
+                  value={goalsText}
+                  onChange={(e) => setGoalsText(e.target.value)}
+                  onBlur={() => onUpdateGoals(goalsText)}
+                  rows={2}
+                  placeholder="ex: só quero terminar a campanha, não preciso de 60fps..."
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600 resize-none"
+                />
+              </div>
+
+              {/* historico de problemas */}
+              <div className="mb-5">
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
+                  <History className="w-3.5 h-3.5" /> Histórico de problemas
+                </div>
+                {game.notes && game.notes.length > 0 && (
+                  <ul className="space-y-1.5 mb-2">
+                    {game.notes.slice().reverse().map((n, i) => (
+                      <li key={i} className="text-sm text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2">
+                        <span className="text-zinc-600 text-xs block mb-0.5">{formatDate(n.date)}</span>
+                        {n.text}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    value={noteText}
+                    onChange={(e) => setNoteText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && noteText.trim()) { onAddNote(noteText); setNoteText(""); } }}
+                    placeholder="ex: travou na área do porto em baixo"
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-600"
+                  />
+                  <button
+                    onClick={() => { if (noteText.trim()) { onAddNote(noteText); setNoteText(""); } }}
+                    className="text-sm bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-lg px-3 py-2"
+                  >
+                    Registrar
+                  </button>
+                </div>
+              </div>
+
+              {/* analisar — sempre roda com o perfil ativo no topo da tela */}
+              <button
+                onClick={onAnalyze}
+                disabled={analyzing}
+                className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 transition-colors text-white text-sm font-medium rounded-lg px-4 py-2.5 mb-1.5"
+              >
+                {analyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {analyzing ? "Analisando com base no seu hardware..." : "Analisar compatibilidade agora"}
+              </button>
+              <p className="text-xs text-zinc-600 text-center mb-4">roda com o perfil ativo: {activeProfileName}</p>
+
+              {error && (
+                <div className="flex items-start gap-2 text-sm text-red-300 bg-red-950 border border-red-800 rounded-lg px-3 py-2 mb-4">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  {error}
+                </div>
+              )}
+
+              {/* abas: escolha qual perfil ver o histórico de análises */}
+              {profiles.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {profiles.map((p) => {
+                    const hasAnalysis = allAnalyses.some((a) => (a.profileId || activeProfileId) === p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => setViewedProfileId(p.id)}
+                        className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                          viewedProfileId === p.id
+                            ? "bg-indigo-600 border-indigo-500 text-white"
+                            : hasAnalysis
+                            ? "bg-zinc-900 border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                            : "bg-transparent border-zinc-800 text-zinc-600"
+                        }`}
+                      >
+                        {p.name}{!hasAnalysis && " (sem análise)"}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* resultado do perfil selecionado na aba */}
+              {latest ? (
+                <div className={`rounded-xl border ${TIER_META[latest.tier]?.border || "border-zinc-700"} bg-zinc-950 p-4 mb-3`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <TierBadge tier={latest.tier} tierLabel={latest.tierLabel} size="lg" />
+                    <div className="text-right">
+                      <span className="text-xs text-zinc-600 block">{formatDate(latest.date)}</span>
+                      <span className="text-xs text-zinc-500">perfil: {latest.profileName || viewedProfile?.name}</span>
+                    </div>
+                  </div>
+                  <p className="text-sm font-medium mb-1.5">{latest.veredito}</p>
+                  <p className="text-sm text-zinc-400 mb-3">{latest.motivo}</p>
+                  {latest.configuracaoRecomendada && (
+                    <p className="text-xs text-zinc-500 mb-2">
+                      <span className="text-zinc-400 font-medium">Configuração sugerida: </span>
+                      {latest.configuracaoRecomendada}
+                    </p>
+                  )}
+                  {latest.avisos && latest.avisos.length > 0 && (
+                    <ul className="space-y-1 mt-2">
+                      {latest.avisos.map((a, i) => (
+                        <li key={i} className="text-xs text-amber-300 flex items-start gap-1.5">
+                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {a}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : (
+                viewedProfileId !== activeProfileId && (
+                  <p className="text-xs text-zinc-600 mb-3">
+                    Ainda não analisado no perfil "{viewedProfile?.name}". Troque o perfil ativo no topo da tela pra
+                    {" "}"{viewedProfile?.name}" e clique em analisar.
+                  </p>
+                )
+              )}
+
+              {older.length > 0 && (
+                <div className="mb-4">
+                  <button
+                    onClick={() => setShowHistory(!showHistory)}
+                    className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    {showHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    Ver {older.length} análise(s) anterior(es) neste perfil
+                  </button>
+                  {showHistory && (
+                    <div className="mt-2 space-y-2">
+                      {older.map((a, i) => (
+                        <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <TierBadge tier={a.tier} tierLabel={a.tierLabel} />
+                            <span className="text-xs text-zinc-600">{formatDate(a.date)}</span>
+                          </div>
+                          <p className="text-xs text-zinc-500">{a.motivo}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
