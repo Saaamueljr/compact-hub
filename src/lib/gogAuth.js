@@ -80,7 +80,7 @@ async function getLibrary() {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Falha ao ler a biblioteca da GOG.");
   maybeUpdateRefreshToken(data.refreshToken);
-  return data.productIds || [];
+  return data.games || []; // [{ productId, title }]
 }
 
 async function getAchievements(productId) {

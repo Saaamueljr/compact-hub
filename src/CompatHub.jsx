@@ -3,6 +3,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { driveSync } from "./lib/driveSync";
 import { gogAuth } from "./lib/gogAuth";
+import { matchGame } from "./lib/matchGame";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 import {
@@ -10,7 +11,7 @@ import {
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
   ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper,
-  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers, KeyRound
+  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers, KeyRound, BarChart3
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -709,6 +710,7 @@ export default function CompatHub() {
 
   const [weeklyEvent, setWeeklyEvent] = useState(null);
   const [showWeeklyBanner, setShowWeeklyBanner] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   // Perfil da conta RA (avatar, rank, pontos) — só é EXIBIDO quando o perfil
   // de hardware ativo estiver marcado como vinculado ao RA (raLinked), no
   // painel de escolha de perfil. É buscado uma vez, sem depender de qual
@@ -1181,6 +1183,15 @@ export default function CompatHub() {
 
             <GogConnectButton />
 
+            <button
+              onClick={() => setShowStats(true)}
+              title="Estatísticas"
+              className="flex items-center gap-1.5 text-xs border rounded-md px-3 py-1.5 transition-colors text-zinc-400 border-zinc-800 hover:text-amber-300 hover:border-amber-700"
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              Stats
+            </button>
+
           <button
             onClick={() => setShowProfile(true)}
             className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:border-zinc-600 rounded-md px-3 py-1.5 transition-colors"
@@ -1494,6 +1505,16 @@ export default function CompatHub() {
 
       {/* modal: notícias e wiki (estilo revista) */}
       {showNews && <NewsModal onClose={() => setShowNews(false)} />}
+
+      {/* modal: estatísticas da biblioteca */}
+      {showStats && (
+        <StatsModal
+          games={games}
+          stats={stats}
+          activeProfileId={activeProfileId}
+          onClose={() => setShowStats(false)}
+        />
+      )}
 
       {/* modal: detalhe do jogo */}
       {activeGame && (
@@ -2936,6 +2957,173 @@ function GogConnectButton() {
   );
 }
 
+// Tela de estatísticas — cores/labels reaproveitados do TIER_META e da
+// lista PLATFORMS que já existem no app, pra ficar consistente com o resto
+// da UI. Sem biblioteca de gráfico (donut via conic-gradient, barras via
+// divs, linha via SVG puro) — menos uma dependência pra manter.
+function StatsModal({ games, stats, activeProfileId, onClose }) {
+  const ownedGames = games.filter((g) => (g.ownership || "owned") === "owned");
+
+  // --- donut: jogos por nível de compatibilidade (perfil ativo) ---
+  const tierCounts = [6, 5, 4, 3, 2, 1].map((tier) => ({
+    tier,
+    meta: TIER_META[tier],
+    count:
+      tier === 6 ? stats.excellent :
+      tier === 5 ? stats.good :
+      tier === 4 ? stats.ok :
+      tier === 3 ? stats.playable :
+      tier === 2 ? stats.bad : stats.incompatible,
+  }));
+  const tierColorVar = {
+    6: "#10b981", 5: "#0ea5e9", 4: "#14b8a6", 3: "#f59e0b", 2: "#f97316", 1: "#ef4444",
+  };
+  let acc = 0;
+  const totalTiered = tierCounts.reduce((s, t) => s + t.count, 0) || 1;
+  const gradientStops = tierCounts
+    .filter((t) => t.count > 0)
+    .map((t) => {
+      const start = (acc / totalTiered) * 360;
+      acc += t.count;
+      const end = (acc / totalTiered) * 360;
+      return `${tierColorVar[t.tier]} ${start}deg ${end}deg`;
+    })
+    .join(", ");
+
+  // --- barras: jogos por plataforma ---
+  const platformCounts = PLATFORMS.map((p) => ({
+    ...p,
+    count: ownedGames.filter((g) => g.platform === p.id).length,
+  })).filter((p) => p.count > 0);
+  const maxPlatformCount = Math.max(1, ...platformCounts.map((p) => p.count));
+
+  // --- linha: jogos adicionados, acumulado por mês ---
+  const byMonth = {};
+  ownedGames.forEach((g) => {
+    if (!g.createdAt) return;
+    const d = new Date(g.createdAt);
+    if (isNaN(d)) return;
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    byMonth[key] = (byMonth[key] || 0) + 1;
+  });
+  const months = Object.keys(byMonth).sort();
+  let running = 0;
+  const progression = months.map((m) => {
+    running += byMonth[m];
+    const [y, mo] = m.split("-");
+    return { label: `${["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"][Number(mo) - 1]}/${y.slice(2)}`, value: running };
+  });
+  const maxProg = Math.max(1, ...progression.map((p) => p.value));
+  const svgW = 100, svgH = 40;
+  const points = progression
+    .map((p, i) => {
+      const x = progression.length > 1 ? (i / (progression.length - 1)) * svgW : svgW / 2;
+      const y = svgH - (p.value / maxProg) * svgH;
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  const completionPct = stats.total ? Math.round((stats.analyzed / stats.total) * 100) : 0;
+  const platinumCount = ownedGames.filter((g) => isPlatinum(g)).length;
+  const finishedCount = ownedGames.filter((g) => g.status === "finished" || g.status === "completed").length;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-start justify-center overflow-y-auto p-4">
+      <div className="w-full max-w-2xl bg-zinc-950 border border-zinc-800 rounded-2xl my-8">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800 sticky top-0 bg-zinc-950 rounded-t-2xl">
+          <h2 className="text-base font-semibold flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-amber-400" /> Estatísticas
+          </h2>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {/* stats gerais */}
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 divide-y divide-zinc-800">
+            {[
+              ["Jogos na biblioteca", stats.total],
+              ["Jogos analisados nesse perfil", `${stats.analyzed} (${completionPct}%)`],
+              ["Jogos zerados/concluídos", finishedCount],
+              ["Jogos platinados", platinumCount],
+            ].map(([label, val]) => (
+              <div key={label} className="flex items-center justify-between px-4 py-2.5 text-sm">
+                <span className="text-zinc-400">{label}</span>
+                <span className="font-bold text-amber-400">{val}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* donut compatibilidade */}
+          {totalTiered > 0 && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+              <h3 className="text-sm font-semibold mb-1">Jogos por nível de compatibilidade</h3>
+              <p className="text-xs text-zinc-500 mb-4">Escala de 6 níveis, no perfil de hardware ativo</p>
+              <div className="flex items-center gap-5">
+                <div
+                  className="w-28 h-28 rounded-full shrink-0"
+                  style={{ background: `conic-gradient(${gradientStops})` }}
+                >
+                  <div className="w-full h-full rounded-full bg-zinc-900 scale-[0.62] flex items-center justify-center text-center">
+                    <span className="text-lg font-bold">{stats.analyzed}</span>
+                  </div>
+                </div>
+                <div className="flex-1 space-y-1.5 text-xs">
+                  {tierCounts.filter((t) => t.count > 0).map((t) => (
+                    <div key={t.tier} className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: tierColorVar[t.tier] }} />
+                      <span className="text-zinc-400 flex-1">{t.meta.label}</span>
+                      <span className="font-semibold">{t.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* barras por plataforma */}
+          {platformCounts.length > 0 && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+              <h3 className="text-sm font-semibold mb-3">Jogos por plataforma</h3>
+              <div className="space-y-2.5">
+                {platformCounts.map((p) => (
+                  <div key={p.id} className="flex items-center gap-3 text-xs">
+                    <span className="w-20 shrink-0 text-zinc-400">{p.label}</span>
+                    <div className="flex-1 h-4 rounded-full bg-zinc-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-amber-500"
+                        style={{ width: `${(p.count / maxPlatformCount) * 100}%` }}
+                      />
+                    </div>
+                    <span className="w-6 text-right font-semibold">{p.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* progressão da biblioteca */}
+          {progression.length > 1 && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+              <h3 className="text-sm font-semibold mb-1">Progressão da biblioteca</h3>
+              <p className="text-xs text-zinc-500 mb-3">Jogos adicionados, acumulado por mês</p>
+              <svg viewBox={`0 0 ${svgW} ${svgH}`} preserveAspectRatio="none" className="w-full h-24">
+                <polyline points={points} fill="none" stroke="#e0b34d" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+                <polyline points={`0,${svgH} ${points} ${svgW},${svgH}`} fill="#e0b34d22" stroke="none" />
+              </svg>
+              <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
+                <span>{progression[0]?.label}</span>
+                <span>{progression[progression.length - 1]?.label}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfileSwitcher({ profiles, activeProfileId, raProfile, onSwitch }) {
   const [open, setOpen] = useState(false);
   const active = profiles.find((p) => p.id === activeProfileId) || profiles[0];
@@ -3551,6 +3739,8 @@ function RetroAchievementsSection({
 function SteamAchievementsSection({ game, onApplyRaData }) {
   const [appIdInput, setAppIdInput] = useState(game.steamAppId || "");
   const [loading, setLoading] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState("");
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [showAll, setShowAll] = useState(false);
@@ -3573,9 +3763,41 @@ function SteamAchievementsSection({ game, onApplyRaData }) {
     }
   }
 
+  // Tenta achar o App ID sozinho comparando o nome do jogo com a
+  // biblioteca Steam do usuário (GetOwnedGames) — só funciona se o jogo já
+  // estiver na conta Steam configurada no servidor.
+  async function autoDetect() {
+    setDetecting(true);
+    setDetectMsg("");
+    setError("");
+    try {
+      const res = await fetch("/api/steam/library");
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      const match = matchGame.findBestMatch(game.name, body.games, (g) => g.name);
+      if (match) {
+        setAppIdInput(String(match.appId));
+        onApplyRaData({ steamAppId: String(match.appId) });
+        await fetchAchievements(match.appId);
+      } else {
+        setDetectMsg("Não achei esse jogo na sua biblioteca Steam — confira o App ID manualmente.");
+      }
+    } catch (e) {
+      setDetectMsg(e.message);
+    } finally {
+      setDetecting(false);
+    }
+  }
+
   useEffect(() => {
-    if (game.steamAppId) fetchAchievements(game.steamAppId);
     setAppIdInput(game.steamAppId || "");
+    setData(null);
+    setDetectMsg("");
+    if (game.steamAppId) {
+      fetchAchievements(game.steamAppId);
+    } else {
+      autoDetect();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id]);
 
@@ -3595,9 +3817,21 @@ function SteamAchievementsSection({ game, onApplyRaData }) {
 
   return (
     <div className="mb-5">
-      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-        <Trophy className="w-3.5 h-3.5" /> Conquistas Steam
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <Trophy className="w-3.5 h-3.5" /> Conquistas Steam
+        </div>
+        <button
+          onClick={autoDetect}
+          disabled={detecting}
+          className="flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300 transition-colors disabled:opacity-50"
+        >
+          {detecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+          Detectar automaticamente
+        </button>
       </div>
+      {detectMsg && <p className="text-[11px] text-amber-400 mb-1.5">{detectMsg}</p>}
+
 
       <div className="flex gap-2 mb-2">
         <input
@@ -3690,6 +3924,8 @@ function SteamAchievementsSection({ game, onApplyRaData }) {
 function GogAchievementsSection({ game, onApplyRaData }) {
   const [productIdInput, setProductIdInput] = useState(game.gogProductId || "");
   const [loading, setLoading] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState("");
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [showAll, setShowAll] = useState(false);
@@ -3711,11 +3947,42 @@ function GogAchievementsSection({ game, onApplyRaData }) {
     }
   }
 
+  // Tenta achar o productId sozinho comparando o nome do jogo com a
+  // biblioteca GOG do usuário — só funciona com a conta conectada e o jogo
+  // já possuído na GOG.
+  async function autoDetect() {
+    if (!connected) return;
+    setDetecting(true);
+    setDetectMsg("");
+    setError("");
+    try {
+      const games = await gogAuth.getLibrary();
+      const match = matchGame.findBestMatch(game.name, games, (g) => g.title);
+      if (match) {
+        setProductIdInput(String(match.productId));
+        onApplyRaData({ gogProductId: String(match.productId) });
+        await fetchAchievements(match.productId);
+      } else {
+        setDetectMsg("Não achei esse jogo na sua biblioteca GOG — confira o ID manualmente.");
+      }
+    } catch (e) {
+      setDetectMsg(e.message);
+    } finally {
+      setDetecting(false);
+    }
+  }
+
   useEffect(() => {
-    if (game.gogProductId && connected) fetchAchievements(game.gogProductId);
     setProductIdInput(game.gogProductId || "");
+    setData(null);
+    setDetectMsg("");
+    if (game.gogProductId && connected) {
+      fetchAchievements(game.gogProductId);
+    } else if (connected) {
+      autoDetect();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game.id]);
+  }, [game.id, connected]);
 
   function handleBlurSave() {
     const trimmed = productIdInput.trim();
@@ -3733,9 +4000,22 @@ function GogAchievementsSection({ game, onApplyRaData }) {
 
   return (
     <div className="mb-5">
-      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-        <Trophy className="w-3.5 h-3.5" /> Conquistas GOG
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <Trophy className="w-3.5 h-3.5" /> Conquistas GOG
+        </div>
+        {connected && (
+          <button
+            onClick={autoDetect}
+            disabled={detecting}
+            className="flex items-center gap-1 text-[11px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50"
+          >
+            {detecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Detectar automaticamente
+          </button>
+        )}
       </div>
+      {detectMsg && <p className="text-[11px] text-amber-400 mb-1.5">{detectMsg}</p>}
 
       {!connected && (
         <p className="flex items-start gap-1.5 text-xs text-amber-300 bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 mb-2">

@@ -1495,7 +1495,9 @@ async function refreshGogToken(refreshToken) {
   return data;
 }
 
-// Lista de jogos possuídos na GOG (IDs numéricos de produto).
+// Lista de jogos possuídos na GOG (ID numérico + título), pra permitir
+// detecção automática por nome. api.gog.com/products aceita até 50 IDs por
+// chamada, por isso processa em lotes.
 async function handleGogLibrary(request, env) {
   const url = new URL(request.url);
   const refreshToken = url.searchParams.get("refreshToken");
@@ -1521,8 +1523,25 @@ async function handleGogLibrary(request, env) {
     return json({ error: "Não foi possível ler a biblioteca da GOG." }, 502);
   }
 
+  const ids = data.owned;
+  const games = [];
+  // api.gog.com/products aceita até 50 ids por chamada
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+    try {
+      const res = await fetch(`https://api.gog.com/products?ids=${batch.join(",")}`);
+      const items = await res.json().catch(() => []);
+      for (const item of Array.isArray(items) ? items : []) {
+        games.push({ productId: item.id, title: item.title || String(item.id) });
+      }
+    } catch {
+      // se um lote falhar, segue pros próximos em vez de abortar tudo
+    }
+  }
+
   return json({
-    productIds: data.owned,
+    productIds: ids,
+    games,
     // devolve de volta caso a GOG tenha rotacionado o refresh_token
     refreshToken: tokenData.refresh_token || refreshToken,
   });
