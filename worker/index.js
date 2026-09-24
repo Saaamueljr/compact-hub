@@ -1370,10 +1370,16 @@ async function handleSteamAchievements(request, env) {
   const schemaUrl = `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?appid=${encodeURIComponent(
     appId
   )}&key=${encodeURIComponent(apiKey)}&l=portuguese`;
+  // playtime só desse jogo — GetOwnedGames aceita um filtro de appids
+  const playtimeUrl =
+    `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${encodeURIComponent(apiKey)}` +
+    `&steamid=${encodeURIComponent(steamId)}` +
+    `&input_json=${encodeURIComponent(JSON.stringify({ appids_filter: [Number(appId)] }))}`;
 
-  const [playerResult, schemaResult] = await Promise.allSettled([
+  const [playerResult, schemaResult, playtimeResult] = await Promise.allSettled([
     fetch(playerUrl).then((r) => r.json()),
     fetch(schemaUrl).then((r) => r.json()),
+    fetch(playtimeUrl).then((r) => r.json()),
   ]);
 
   if (playerResult.status !== "fulfilled" || !playerResult.value?.playerstats) {
@@ -1414,10 +1420,16 @@ async function handleSteamAchievements(request, env) {
 
   const numAwardedToUser = achievements.filter((a) => a.earned).length;
 
+  const playtimeMinutes =
+    playtimeResult.status === "fulfilled"
+      ? playtimeResult.value?.response?.games?.[0]?.playtime_forever ?? null
+      : null;
+
   return json({
     gameTitle: playerStats.gameName || null,
     numAchievements: achievements.length,
     numAwardedToUser,
+    playtimeMinutes,
     userCompletion: achievements.length ? `${((numAwardedToUser / achievements.length) * 100).toFixed(2)}%` : "0.00%",
     achievements,
   });

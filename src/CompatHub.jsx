@@ -11,7 +11,7 @@ import {
   AlertTriangle, Settings2, History, Target, ChevronDown, ChevronUp,
   Star, Users, Trophy, Award, Bell, Clock, Info, Cpu, Pencil, LayoutGrid, List, ArrowUpDown, BookOpen,
   ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Cloud, CloudOff, CloudCog, Newspaper,
-  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers, KeyRound, BarChart3
+  FileSpreadsheet, ShoppingCart, Upload, CheckCircle2, Layers, KeyRound, BarChart3, Flag
 } from "lucide-react";
 
 const STORAGE_KEY = "compat-hub-data";
@@ -978,6 +978,7 @@ export default function CompatHub() {
       status: null,
       franchise: "",
       runningVia: defaultRunningVia(platform),
+      homeProfileId: activeProfileId || null,
       raGameId: raGameId?.trim() || "",
       raIconUrl: raIconUrl || "",
       raProgress: raProgress || null,
@@ -1077,12 +1078,16 @@ export default function CompatHub() {
     const matchesFavorite = !onlyFavorites || g.favorite;
     const matchesPlatinum = !onlyPlatinum || isPlatinum(g);
     const matchesFranchise = franchiseFilter === "all" || g.franchise === franchiseFilter;
+    // jogos sem perfil vinculado (cadastrados antes dessa separação existir)
+    // continuam aparecendo em qualquer perfil — só os novos, vinculados a um
+    // perfil específico no momento em que foram adicionados, ficam restritos.
+    const matchesHomeProfile = !g.homeProfileId || g.homeProfileId === activeProfileId;
     // jogo sem análise pra ESTE perfil continua aparecendo (senão não dá pra
     // nem achar ele pra analisar) — só some quando já foi analisado e ficou
     // abaixo do corte de "jogável" nesse hardware específico.
     const latestForProfile = (g.analyses || []).find((a) => !a.profileId || a.profileId === activeProfileId);
     const matchesCompat = !onlyCompatible || !latestForProfile || latestForProfile.tier >= MIN_PLAYABLE_TIER;
-    return matchesOwnership && matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise && matchesCompat;
+    return matchesOwnership && matchesQuery && matchesPlatform && matchesStatus && matchesFavorite && matchesPlatinum && matchesFranchise && matchesHomeProfile && matchesCompat;
   });
 
   const activeGame = games.find((g) => g.id === activeGameId) || null;
@@ -2233,6 +2238,7 @@ function BulkImportModal({ games, profile, defaultOwnership, onClose, onImport }
       status: null,
       franchise: "",
       runningVia: defaultRunningVia(platform),
+      homeProfileId: activeProfileId || null,
       raGameId: "",
       raIconUrl: "",
       raProgress: null,
@@ -3802,6 +3808,36 @@ function RetroAchievementsSection({
 // RetroAchievementsSection acima, mas sem tradução (a Steam já devolve os
 // textos no idioma pedido, ver ?l=portuguese no worker) nem estimativa de
 // tempo (a Steam devolve unlocktime real, não precisa estimar).
+// Steam e GOG não distinguem conquista de história de conquista secundária
+// (diferente da RA, que já vem classificada) — então o usuário escolhe UMA
+// conquista da lista como "essa = terminei o jogo" (game.finishSignalId).
+// Sempre que a lista de conquistas é buscada, confere se ela foi
+// desbloqueada e aplica o selo "Zerado" sozinho.
+function applyFinishSignal(achievements, game, onApplyRaData) {
+  if (!game.finishSignalId || game.status === "completed") return;
+  const signal = achievements.find((a) => a.id === game.finishSignalId);
+  if (signal?.earned) onApplyRaData({ status: "completed" });
+}
+
+// Botãozinho de bandeira em cada conquista — marca ela como "essa =
+// terminei o jogo" (ou desmarca, clicando de novo). Reaproveitado pelo
+// Steam e pela GOG.
+function FinishSignalToggle({ achievementId, game, onApplyRaData }) {
+  const active = game.finishSignalId === achievementId;
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onApplyRaData({ finishSignalId: active ? null : achievementId });
+      }}
+      title={active ? "Remover como gatilho de \"Zerado\"" : "Marcar esta conquista como \"terminei o jogo\""}
+      className={`shrink-0 transition-colors ${active ? "text-amber-400" : "text-zinc-700 hover:text-zinc-400"}`}
+    >
+      <Flag className="w-3.5 h-3.5" fill={active ? "currentColor" : "none"} />
+    </button>
+  );
+}
+
 function SteamAchievementsSection({ game, onApplyRaData }) {
   const [appIdInput, setAppIdInput] = useState(game.steamAppId || "");
   const [loading, setLoading] = useState(false);
@@ -3820,7 +3856,12 @@ function SteamAchievementsSection({ game, onApplyRaData }) {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
       setData(body);
-      onApplyRaData({ steamAchievements: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements } });
+      const patch = { steamAchievements: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements } };
+      if (body.playtimeMinutes != null) {
+        patch.playtimeHours = Math.round((body.playtimeMinutes / 60) * 10) / 10;
+      }
+      onApplyRaData(patch);
+      applyFinishSignal(body.achievements, game, onApplyRaData);
     } catch (e) {
       setError(e.message);
       setData(null);
@@ -3963,7 +4004,10 @@ function SteamAchievementsSection({ game, onApplyRaData }) {
                   <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
                   {a.description && <p className="truncate text-zinc-600">{a.description}</p>}
                 </div>
-                {a.earned && <span className="ml-auto text-sky-400 shrink-0">✓</span>}
+                <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                  {a.earned && <span className="text-sky-400">✓</span>}
+                  <FinishSignalToggle achievementId={a.id} game={game} onApplyRaData={onApplyRaData} />
+                </div>
               </li>
             ))}
           </ul>
@@ -4005,6 +4049,7 @@ function GogAchievementsSection({ game, onApplyRaData }) {
       const body = await gogAuth.getAchievements(productId);
       setData(body);
       onApplyRaData({ gogAchievements: { numAwardedToUser: body.numAwardedToUser, numAchievements: body.numAchievements } });
+      applyFinishSignal(body.achievements, game, onApplyRaData);
     } catch (e) {
       setError(e.message);
       setData(null);
@@ -4148,7 +4193,10 @@ function GogAchievementsSection({ game, onApplyRaData }) {
                   <p className={`truncate ${a.earned ? "text-zinc-200" : "text-zinc-500"}`}>{a.title}</p>
                   {a.description && <p className="truncate text-zinc-600">{a.description}</p>}
                 </div>
-                {a.earned && <span className="ml-auto text-purple-400 shrink-0">✓</span>}
+                <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                  {a.earned && <span className="text-purple-400">✓</span>}
+                  <FinishSignalToggle achievementId={a.id} game={game} onApplyRaData={onApplyRaData} />
+                </div>
               </li>
             ))}
           </ul>
@@ -4779,7 +4827,24 @@ function GameDetailModal({
               </select>
             </div>
           </div>
-          <p className="text-xs text-zinc-500 mb-4">adicionado em {formatDate(game.createdAt)}</p>
+          <p className="text-xs text-zinc-500 mb-1 flex items-center gap-1.5">
+            adicionado em {formatDate(game.createdAt)}
+          </p>
+          <div className="flex items-center gap-1.5 mb-4">
+            <Cpu className="w-3 h-3 text-zinc-600" />
+            <span className="text-xs text-zinc-600">perfil:</span>
+            <select
+              value={game.homeProfileId || ""}
+              onChange={(e) => onApplyRaData({ homeProfileId: e.target.value || null })}
+              className="text-xs bg-transparent text-zinc-400 outline-none cursor-pointer hover:text-zinc-200"
+              title="Perfil de hardware ao qual este jogo pertence — em branco aparece em todos os perfis"
+            >
+              <option value="" className="bg-zinc-900">todos os perfis</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
+              ))}
+            </select>
+          </div>
 
           {/* metadados + lore/história do jogo (gerado por IA, funciona pra
               qualquer plataforma) — fica antes dos status, como pedido */}
