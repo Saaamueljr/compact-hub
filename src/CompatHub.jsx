@@ -165,6 +165,15 @@ function platformOf(id) {
   return PLATFORMS.find((p) => p.id === id) || PLATFORMS[PLATFORMS.length - 1];
 }
 
+// Chute inicial de "rodando via" baseado na plataforma — só um valor
+// padrão, o campo continua 100% editável (ex: rodar um jogo Steam via
+// Proton numa config retrô foge da regra, e tudo bem).
+function defaultRunningVia(platform) {
+  if (platform === "retro") return "";
+  if (["steam", "gog", "epic", "amazon"].includes(platform)) return "Executável nativo (launcher da loja)";
+  return "";
+}
+
 // Rótulo de exibição da plataforma/loja — usa o texto livre digitado pelo
 // usuário quando a plataforma é "Outro" (ex: "Xbox PC/Game Pass"), senão
 // cai no rótulo fixo padrão ("Steam", "Epic Games" etc).
@@ -968,7 +977,7 @@ export default function CompatHub() {
       favorite: false,
       status: null,
       franchise: "",
-      runningVia: "",
+      runningVia: defaultRunningVia(platform),
       raGameId: raGameId?.trim() || "",
       raIconUrl: raIconUrl || "",
       raProgress: raProgress || null,
@@ -2223,7 +2232,7 @@ function BulkImportModal({ games, profile, defaultOwnership, onClose, onImport }
       favorite: false,
       status: null,
       franchise: "",
-      runningVia: "",
+      runningVia: defaultRunningVia(platform),
       raGameId: "",
       raIconUrl: "",
       raProgress: null,
@@ -3475,6 +3484,35 @@ function RetroAchievementsSection({
   const [translations, setTranslations] = useState(game.raTranslations || {});
   const [translating, setTranslating] = useState(false);
   const [translateError, setTranslateError] = useState("");
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState("");
+
+  // Tenta achar o gameId sozinho comparando o nome do jogo com a biblioteca
+  // RA do usuário (API_GetUserCompletionProgress) — mesmo padrão usado pro
+  // Steam e pra GOG. Só funciona se o jogo já tiver alguma conquista/progresso
+  // registrado na conta RA (é isso que aquele endpoint lista).
+  async function autoDetect() {
+    setDetecting(true);
+    setDetectMsg("");
+    setError("");
+    try {
+      const res = await fetch("/api/retroachievements/library");
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Erro ${res.status}`);
+      const match = matchGame.findBestMatch(game.name, body.games, (g) => g.title);
+      if (match) {
+        setGameIdInput(String(match.gameId));
+        onUpdateRaGameId(String(match.gameId));
+        await fetchProgress(match.gameId);
+      } else {
+        setDetectMsg("Não achei esse jogo na sua conta RA — confira o ID manualmente (ou jogue algo nele primeiro).");
+      }
+    } catch (e) {
+      setDetectMsg(e.message);
+    } finally {
+      setDetecting(false);
+    }
+  }
 
   async function fetchProgress(id) {
     if (!id) return;
@@ -3503,6 +3541,17 @@ function RetroAchievementsSection({
         raAward: { kind: body.highestAwardKind, date: body.highestAwardDate },
         raPlaySpan: { first: body.firstUnlockDate, last: body.lastUnlockDate },
       };
+      // A própria RA já classifica o progresso do usuário (beaten-softcore /
+      // beaten-hardcore / completed / mastered) — usamos isso pra marcar
+      // "Zerado" sozinho, sem precisar de sinalização manual. Platinado já é
+      // automático via isPlatinum() (100% das conquistas), então aqui só
+      // cuida do "Zerado".
+      if (
+        ["beaten-softcore", "beaten-hardcore", "completed", "mastered"].includes(body.highestAwardKind) &&
+        game.status !== "completed"
+      ) {
+        patch.status = "completed";
+      }
       // Se o jogo ainda não tem capa manual, usa a boxart do RetroAchievements.
       if (!game.coverUrl && body.boxArtUrl) patch.coverUrl = body.boxArtUrl;
       onApplyRaData(patch);
@@ -3526,10 +3575,16 @@ function RetroAchievementsSection({
   }
 
   // Se o jogo já tem um ID salvo, busca o progresso automaticamente ao abrir.
+  // Senão, tenta detectar sozinho antes de pedir pro usuário digitar.
   useEffect(() => {
-    if (game.raGameId) fetchProgress(game.raGameId);
     setTranslations(game.raTranslations || {});
     setGameIdInput(game.raGameId || "");
+    setDetectMsg("");
+    if (game.raGameId) {
+      fetchProgress(game.raGameId);
+    } else {
+      autoDetect();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id]);
 
@@ -3585,9 +3640,20 @@ function RetroAchievementsSection({
 
   return (
     <div className="mb-5">
-      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1.5">
-        <Trophy className="w-3.5 h-3.5" /> RetroAchievements
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <Trophy className="w-3.5 h-3.5" /> RetroAchievements
+        </div>
+        <button
+          onClick={autoDetect}
+          disabled={detecting}
+          className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50"
+        >
+          {detecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+          Detectar automaticamente
+        </button>
       </div>
+      {detectMsg && <p className="text-[11px] text-amber-400 mb-1.5">{detectMsg}</p>}
 
       <div className="flex gap-2 mb-2">
         <input

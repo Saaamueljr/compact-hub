@@ -973,6 +973,44 @@ async function handleRetroAchievements(request, env) {
 
 // Tempo médio (mediana entre todos os jogadores) pra zerar/platinar um jogo —
 // dado da comunidade, não é o tempo pessoal do usuário.
+// Lista de jogos com progresso do usuário na RA (até 500), pra permitir
+// detecção automática do gameId por nome — mesmo padrão usado em
+// handleSteamLibrary/handleGogLibrary. Reaproveita o endpoint que o app já
+// chama em handleRetroAchievements (API_GetUserCompletionProgress).
+async function handleRetroAchievementsLibrary(request, env) {
+  const apiKey = env.RA_API_KEY;
+  const username = env.RA_USERNAME;
+  if (!apiKey || !username) {
+    return json(
+      { error: "RA_USERNAME e/ou RA_API_KEY não configurados no servidor (Settings > Variables and Secrets)." },
+      500
+    );
+  }
+
+  const completionUrl = `https://retroachievements.org/API/API_GetUserCompletionProgress.php?u=${encodeURIComponent(
+    username
+  )}&y=${encodeURIComponent(apiKey)}&c=500`;
+
+  let response;
+  try {
+    response = await fetch(completionUrl);
+  } catch (e) {
+    return json({ error: `Falha ao contatar o RetroAchievements: ${e.message}` }, 502);
+  }
+  const data = await response.json().catch(() => null);
+  if (!data?.Results) {
+    return json({ error: "Não foi possível ler a biblioteca do RetroAchievements." }, 502);
+  }
+
+  const games = data.Results.map((g) => ({
+    gameId: g.GameID,
+    title: g.Title,
+    consoleName: g.ConsoleName,
+  }));
+
+  return json({ games });
+}
+
 async function handleRetroAchievementsProgression(request, env) {
   const url = new URL(request.url);
   const gameId = url.searchParams.get("gameId");
@@ -1113,6 +1151,16 @@ export default {
       }
       if (request.method === "GET") {
         return handleRetroAchievementsProgression(request, env);
+      }
+      return json({ error: "Método não permitido." }, 405);
+    }
+
+    if (url.pathname === "/api/retroachievements/library") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      if (request.method === "GET") {
+        return handleRetroAchievementsLibrary(request, env);
       }
       return json({ error: "Método não permitido." }, 405);
     }
